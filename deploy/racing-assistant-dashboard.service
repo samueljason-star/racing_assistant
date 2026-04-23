@@ -1,0 +1,18 @@
+[Unit]
+Description=Racing Assistant Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=samueljasonhines
+WorkingDirectory=/home/samueljasonhines/racing_assistant
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/samueljasonhines/racing_assistant
+ExecStart=/home/samueljasonhines/racing_assistant/venv/bin/python3 -m app.dashboard.run_dashboard
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

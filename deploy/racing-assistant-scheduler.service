@@ -1,0 +1,16 @@
+[Unit]
+Description=Racing Assistant Live Scheduler
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/YOUR_USERNAME/racing_assistant
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/YOUR_USERNAME/racing_assistant/venv/bin/python3 /home/YOUR_USERNAME/racing_assistant/app/scheduler/run_live_scheduler.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

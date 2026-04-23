@@ -1,3 +1,4 @@
+from app.betting.market_helpers import odds_bucket_label
 from app.models import Meeting, Race, Runner
 
 
@@ -11,7 +12,7 @@ def get_runner_name_map(db, runner_ids):
 
 
 def get_race_context_map(db, race_ids):
-    """Return race context keyed by race_id including track and race number."""
+    """Return race context keyed by race_id including track and race metadata."""
     if not race_ids:
         return {}
 
@@ -26,6 +27,8 @@ def get_race_context_map(db, race_ids):
         context[race.id] = {
             "track": meeting.track if meeting else None,
             "race_number": race.race_number,
+            "meeting_type": meeting.meeting_type if meeting else None,
+            "race_type": race.class_name,
         }
     return context
 
@@ -45,17 +48,27 @@ def enrich_paper_bets(db, bets):
                 "race_id": bet.race_id,
                 "track": race_context.get("track"),
                 "race_number": race_context.get("race_number"),
+                "meeting_type": race_context.get("meeting_type"),
+                "race_type": race_context.get("race_type"),
                 "runner_id": bet.runner_id,
                 "odds_taken": bet.odds_taken,
                 "stake": bet.stake,
                 "market_probability": bet.market_probability,
                 "model_probability": bet.model_probability,
                 "edge": bet.edge,
+                "commission_rate": getattr(bet, "commission_rate", None),
                 "decision_reason": bet.decision_reason,
                 "decision_version": bet.decision_version,
                 "result": bet.result,
                 "profit_loss": bet.profit_loss,
                 "settled_flag": bet.settled_flag,
+                "paper_bank_reset_id": getattr(bet, "paper_bank_reset_id", None),
+                "closing_odds": getattr(bet, "closing_odds", None),
+                "final_observed_odds": getattr(bet, "final_observed_odds", None),
+                "closing_line_difference": getattr(bet, "closing_line_difference", None),
+                "closing_line_pct": getattr(bet, "closing_line_pct", None),
+                "beat_closing_line": getattr(bet, "beat_closing_line", None),
+                "odds_bucket": odds_bucket_label(bet.odds_taken),
             }
         )
 

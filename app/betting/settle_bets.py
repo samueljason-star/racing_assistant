@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -6,13 +7,30 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.betting.bet_details import enrich_paper_bets
+from app.betting.market_helpers import closing_line_metrics
 from app.betting.paper_bank import get_current_bank
-from app.db import SessionLocal
-from app.models import PaperBet, Result
+from app.db import SessionLocal, init_db
+from app.models import OddsSnapshot, PaperBet, Result
 from app.notifier.telegram import send_telegram_message
 
 
+def _get_final_observed_odds(db, bet: PaperBet):
+    latest_snapshot = (
+        db.query(OddsSnapshot)
+        .filter(
+            OddsSnapshot.race_id == bet.race_id,
+            OddsSnapshot.runner_id == bet.runner_id,
+        )
+        .order_by(OddsSnapshot.timestamp.desc())
+        .first()
+    )
+    if not latest_snapshot or latest_snapshot.odds is None or latest_snapshot.odds <= 0:
+        return None
+    return latest_snapshot.odds
+
+
 def settle_bets():
+    init_db()
     db = SessionLocal()
 
     try:
@@ -41,24 +59,48 @@ def settle_bets():
                 bet.result = "LOSE"
                 losses += 1
 
+            final_observed_odds = _get_final_observed_odds(db, bet)
+            clv = closing_line_metrics(bet.odds_taken, final_observed_odds)
+            bet.closing_odds = final_observed_odds
+            bet.final_observed_odds = final_observed_odds
+            bet.closing_line_difference = clv["closing_line_difference"]
+            bet.closing_line_pct = clv["closing_line_pct"]
+            bet.beat_closing_line = clv["beat_closing_line"]
             bet.settled_flag = True
+            bet.settled_at = datetime.utcnow()
             bets_settled += 1
             current_bank = round(current_bank + (bet.profit_loss or 0.0), 2)
 
             bet_detail = enrich_paper_bets(db, [bet])[0]
-            message = (
-                "Paper Bet Settled\n"
-                f"Horse: {bet_detail['horse_name']}\n"
-                f"Track: {bet_detail['track'] or 'Unknown'}\n"
-                f"Race Number: {bet_detail['race_number'] or 'Unknown'}\n"
-                f"Race ID: {bet_detail['race_id']}\n"
-                f"Result: {bet_detail['result']}\n"
-                f"Odds Taken: {bet_detail['odds_taken']:.2f}\n"
-                f"Stake: ${bet_detail['stake']:.2f}\n"
-                f"Profit/Loss: ${bet_detail['profit_loss']:.2f}\n"
-                f"Current Bank: ${current_bank:.2f}"
+            message_lines = [
+                "Paper Bet Settled",
+                f"Horse: {bet_detail['horse_name']}",
+                f"Track: {bet_detail['track'] or 'Unknown'}",
+                f"Race Number: {bet_detail['race_number'] or 'Unknown'}",
+                f"Race ID: {bet_detail['race_id']}",
+                f"Result: {bet_detail['result']}",
+                f"Odds Taken: {bet_detail['odds_taken']:.2f}",
+            ]
+            if bet_detail["final_observed_odds"] is not None:
+                message_lines.append(
+                    f"Final Odds: {bet_detail['final_observed_odds']:.2f}"
+                )
+            if bet_detail["closing_line_difference"] is not None:
+                message_lines.append(
+                    f"CLV Diff: {bet_detail['closing_line_difference']:+.2f}"
+                )
+            if bet_detail["beat_closing_line"] is not None:
+                message_lines.append(
+                    f"Beat Closing Line: {bet_detail['beat_closing_line']}"
+                )
+            message_lines.extend(
+                [
+                    f"Stake: ${bet_detail['stake']:.2f}",
+                    f"Profit/Loss: ${bet_detail['profit_loss']:.2f}",
+                    f"Current Bank: ${current_bank:.2f}",
+                ]
             )
-            send_telegram_message(message)
+            send_telegram_message("\n".join(message_lines))
 
         db.commit()
 

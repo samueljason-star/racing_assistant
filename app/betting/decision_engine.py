@@ -1,15 +1,19 @@
-from app.db import SessionLocal
-from app.models import Prediction, Feature, OddsSnapshot, PaperBet
+from app.betting.market_helpers import calculate_edge, commission_adjusted_market_probability
+from app.betting.paper_bank import get_latest_reset, get_next_stake
+from app.config import ACTIVE_DECISION_VERSION, BETFAIR_COMMISSION_RATE, PAPER_MIN_EDGE
+from app.db import SessionLocal, init_db
+from app.models import Feature, OddsSnapshot, PaperBet, Prediction
 
-EDGE_THRESHOLD = 0.05
+EDGE_THRESHOLD = PAPER_MIN_EDGE
 MIN_CONFIDENCE = 0.60
-FIXED_STAKE = 100.0
 
 
 def create_paper_bets() -> None:
+    init_db()
     db = SessionLocal()
     try:
         predictions = db.query(Prediction).all()
+        latest_reset = get_latest_reset(db)
 
         for pred in predictions:
             feature = db.query(Feature).filter(
@@ -17,17 +21,27 @@ def create_paper_bets() -> None:
                 Feature.runner_id == pred.runner_id,
             ).first()
 
-            latest_odds = db.query(OddsSnapshot).filter(
-                OddsSnapshot.race_id == pred.race_id,
-                OddsSnapshot.runner_id == pred.runner_id,
-            ).order_by(OddsSnapshot.timestamp.desc()).first()
+            latest_odds = (
+                db.query(OddsSnapshot)
+                .filter(
+                    OddsSnapshot.race_id == pred.race_id,
+                    OddsSnapshot.runner_id == pred.runner_id,
+                )
+                .order_by(OddsSnapshot.timestamp.desc())
+                .first()
+            )
 
             if not feature or not latest_odds:
                 continue
 
-            market_probability = feature.market_probability or 0
+            market_probability = commission_adjusted_market_probability(
+                latest_odds.odds,
+                BETFAIR_COMMISSION_RATE,
+            )
             model_probability = pred.model_probability or 0
-            edge = model_probability - market_probability
+            edge = calculate_edge(model_probability, market_probability)
+            if market_probability is None or edge is None:
+                continue
 
             already_exists = db.query(PaperBet).filter(
                 PaperBet.race_id == pred.race_id,
@@ -42,9 +56,15 @@ def create_paper_bets() -> None:
                     market_probability=market_probability,
                     model_probability=model_probability,
                     edge=edge,
-                    stake=FIXED_STAKE,
-                    decision_reason="Model edge over market",
-                    decision_version="v1",
+                    stake=get_next_stake(db),
+                    commission_rate=BETFAIR_COMMISSION_RATE,
+                    decision_reason=(
+                        "Model edge over commission-adjusted market | "
+                        f"market_adj={market_probability:.4f} | "
+                        f"commission={BETFAIR_COMMISSION_RATE:.2%}"
+                    ),
+                    decision_version=ACTIVE_DECISION_VERSION,
+                    paper_bank_reset_id=latest_reset.id if latest_reset else None,
                 )
                 db.add(bet)
 
