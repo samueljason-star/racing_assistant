@@ -1,0 +1,12 @@
+pandas
+numpy
+sqlalchemy
+scikit-learn
+requests
+beautifulsoup4
+python-dotenv
+openai
+apscheduler
+matplotlib
+betfairlightweight
+betfairlightweight
