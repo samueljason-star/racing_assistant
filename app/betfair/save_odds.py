@@ -3,32 +3,16 @@ import re
 import sys
 from pathlib import Path
 
-import requests
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.betfair.get_markets import fetch_au_thoroughbred_win_markets
-from app.config import BETFAIR_APP_KEY, BETFAIR_SSID
+from app.betfair.session import post_json_rpc
 from app.db import SessionLocal, init_db
 from app.models import Meeting, OddsSnapshot, Race, Runner
 
-BETFAIR_API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 RACE_NUMBER_RE = re.compile(r"^R(\d+)\b", re.IGNORECASE)
-
-
-def _build_headers():
-    if not BETFAIR_APP_KEY:
-        raise ValueError("Missing BETFAIR_APP_KEY in .env.")
-    if not BETFAIR_SSID:
-        raise ValueError("Missing BETFAIR_SSID in .env.")
-
-    return {
-        "X-Application": BETFAIR_APP_KEY,
-        "X-Authentication": BETFAIR_SSID,
-        "Content-Type": "application/json",
-    }
 
 
 def _extract_result(data):
@@ -84,14 +68,7 @@ def _fetch_market_books(market_ids):
         }
     ]
 
-    response = requests.post(
-        BETFAIR_API_URL,
-        data=json.dumps(payload),
-        headers=_build_headers(),
-        timeout=30,
-    )
-    response.raise_for_status()
-    return _extract_result(response.json())
+    return _extract_result(post_json_rpc(payload, timeout=30))
 
 
 def save_odds():

@@ -3,31 +3,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import requests
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.config import BETFAIR_APP_KEY, BETFAIR_SSID
-
-BETFAIR_API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+from app.betfair.session import post_json_rpc
 
 
 def _build_headers():
-    if not BETFAIR_APP_KEY:
-        raise ValueError(
-            "Missing Betfair app key. Set BETFAIR_APP_KEY in .env "
-            "(APP_KEY is still accepted as a fallback)."
-        )
-    if not BETFAIR_SSID:
-        raise ValueError("Missing BETFAIR_SSID in .env.")
-
-    return {
-        "X-Application": BETFAIR_APP_KEY,
-        "X-Authentication": BETFAIR_SSID,
-        "Content-Type": "application/json",
-    }
+    return None
 
 
 def _extract_result(data):
@@ -69,8 +53,6 @@ def is_au_thoroughbred_market(market):
 
 
 def fetch_au_thoroughbred_win_markets():
-    headers = _build_headers()
-
     now = datetime.now(timezone.utc)
     end = now + timedelta(days=1)
 
@@ -100,15 +82,7 @@ def fetch_au_thoroughbred_win_markets():
         }
     ]
 
-    response = requests.post(
-        BETFAIR_API_URL,
-        data=json.dumps(payload),
-        headers=headers,
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    raw_markets = _extract_result(response.json())
+    raw_markets = _extract_result(post_json_rpc(payload, timeout=30))
     filtered = [market for market in raw_markets if is_au_thoroughbred_market(market)]
     return raw_markets, filtered
 

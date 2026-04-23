@@ -15,6 +15,21 @@ BETFAIR_APP_KEY = os.getenv("BETFAIR_APP_KEY") or os.getenv("APP_KEY")
 BETFAIR_SSID = os.getenv("BETFAIR_SSID")
 BETFAIR_USERNAME = os.getenv("BETFAIR_USERNAME")
 BETFAIR_PASSWORD = os.getenv("BETFAIR_PASSWORD")
+BETFAIR_CERT_FILE = os.getenv("BETFAIR_CERT_FILE")
+BETFAIR_KEY_FILE = os.getenv("BETFAIR_KEY_FILE")
+BETFAIR_REGION = os.getenv("BETFAIR_REGION", "AU").upper()
+BETFAIR_IDENTITY_BASE_URL = os.getenv(
+    "BETFAIR_IDENTITY_BASE_URL",
+    "https://identitysso-cert.betfair.com.au"
+    if BETFAIR_REGION in {"AU", "NZ"}
+    else "https://identitysso-cert.betfair.com",
+)
+BETFAIR_KEEPALIVE_URL = os.getenv(
+    "BETFAIR_KEEPALIVE_URL",
+    "https://identitysso.betfair.com.au/api/keepAlive"
+    if BETFAIR_REGION in {"AU", "NZ"}
+    else "https://identitysso.betfair.com/api/keepAlive",
+)
 
 
 def _get_float_env(name: str, default: float) -> float:
