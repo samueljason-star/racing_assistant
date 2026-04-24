@@ -38,6 +38,12 @@ def _ensure_paper_bets_columns() -> None:
         required_columns = {
             "commission_rate": "ALTER TABLE paper_bets ADD COLUMN commission_rate FLOAT DEFAULT 0.08",
             "paper_bank_reset_id": "ALTER TABLE paper_bets ADD COLUMN paper_bank_reset_id INTEGER",
+            "form_score": "ALTER TABLE paper_bets ADD COLUMN form_score FLOAT",
+            "combined_score": "ALTER TABLE paper_bets ADD COLUMN combined_score FLOAT",
+            "qualification_reason": "ALTER TABLE paper_bets ADD COLUMN qualification_reason VARCHAR",
+            "last_start_finish": "ALTER TABLE paper_bets ADD COLUMN last_start_finish FLOAT",
+            "avg_last3_finish": "ALTER TABLE paper_bets ADD COLUMN avg_last3_finish FLOAT",
+            "avg_last3_margin": "ALTER TABLE paper_bets ADD COLUMN avg_last3_margin FLOAT",
             "closing_odds": "ALTER TABLE paper_bets ADD COLUMN closing_odds FLOAT",
             "final_observed_odds": "ALTER TABLE paper_bets ADD COLUMN final_observed_odds FLOAT",
             "closing_line_difference": "ALTER TABLE paper_bets ADD COLUMN closing_line_difference FLOAT",
@@ -76,6 +82,12 @@ def _ensure_paper_bet_archives_columns() -> None:
         }
         required_columns = {
             "clv_percent": "ALTER TABLE paper_bet_archives ADD COLUMN clv_percent FLOAT",
+            "form_score": "ALTER TABLE paper_bet_archives ADD COLUMN form_score FLOAT",
+            "combined_score": "ALTER TABLE paper_bet_archives ADD COLUMN combined_score FLOAT",
+            "qualification_reason": "ALTER TABLE paper_bet_archives ADD COLUMN qualification_reason VARCHAR",
+            "last_start_finish": "ALTER TABLE paper_bet_archives ADD COLUMN last_start_finish FLOAT",
+            "avg_last3_finish": "ALTER TABLE paper_bet_archives ADD COLUMN avg_last3_finish FLOAT",
+            "avg_last3_margin": "ALTER TABLE paper_bet_archives ADD COLUMN avg_last3_margin FLOAT",
         }
 
         for column_name, ddl in required_columns.items():

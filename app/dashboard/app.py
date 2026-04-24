@@ -295,10 +295,16 @@ HTML_TEMPLATE = """
             <div class="bet-line">Raw Market Prob: {{ "%.4f"|format(bet.raw_market_probability or 0) }}</div>
             <div class="bet-line">Adj Market Prob: {{ "%.4f"|format(bet.market_probability) }}</div>
             <div class="bet-line">Edge: {{ "%.4f"|format(bet.edge) }}</div>
+            <div class="bet-line">Form Score: {{ "%.4f"|format(bet.form_score or 0) }}</div>
+            <div class="bet-line">Combined Score: {{ "%.4f"|format(bet.combined_score or 0) }}</div>
+            <div class="bet-line">Recent Form: {{ bet.qualification_reason or "N/A" }}</div>
             <div class="bet-line">Result: {{ bet.result or "OPEN" }}</div>
             <div class="bet-line">Profit/Loss: ${{ "%.2f"|format(bet.profit_loss or 0) }}</div>
             <div class="bet-line">Final Odds: {{ "%.2f"|format(bet.final_observed_odds or 0) if bet.final_observed_odds is not none else "N/A" }}</div>
             <div class="bet-line">CLV Percent: {{ ("%+.2f"|format(bet.clv_percent)) ~ "%" if bet.clv_percent is not none else "N/A" }}</div>
+            <div class="bet-line">Last Start Finish: {{ bet.last_start_finish if bet.last_start_finish is not none else "N/A" }}</div>
+            <div class="bet-line">Avg Last 3 Finish: {{ "%.2f"|format(bet.avg_last3_finish) if bet.avg_last3_finish is not none else "N/A" }}</div>
+            <div class="bet-line">Avg Margin: {{ "%.2f"|format(bet.avg_last3_margin) if bet.avg_last3_margin is not none else "N/A" }}</div>
           </div>
           <div class="bet-full">Decision Reason: {{ bet.decision_reason or "N/A" }}</div>
         </div>
