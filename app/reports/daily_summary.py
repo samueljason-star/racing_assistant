@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -17,7 +17,7 @@ from app.betting.paper_bank import (
 )
 from app.config import ACTIVE_DECISION_VERSION
 from app.db import SessionLocal, init_db
-from app.models import Meeting, PaperBet, Race
+from app.models import PaperBet
 from app.reports.performance import (
     build_edge_bucket_breakdown,
     build_odds_bucket_breakdown,
@@ -28,20 +28,21 @@ from app.reports.performance import (
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
 
 
-def _today_iso() -> str:
-    return datetime.now(BRISBANE_TZ).date().isoformat()
+def _today_date():
+    return datetime.now(BRISBANE_TZ).date()
 
 
-def _race_date_map(db, race_ids):
-    if not race_ids:
-        return {}
+def _to_brisbane(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(BRISBANE_TZ)
 
-    races = db.query(Race).filter(Race.id.in_(sorted(set(race_ids)))).all()
-    meeting_ids = [race.meeting_id for race in races if race.meeting_id is not None]
-    meetings = db.query(Meeting).filter(Meeting.id.in_(sorted(set(meeting_ids)))).all()
-    meeting_map = {meeting.id: meeting.date for meeting in meetings}
 
-    return {race.id: meeting_map.get(race.meeting_id) for race in races}
+def _is_same_brisbane_day(value, target_date) -> bool:
+    converted = _to_brisbane(value)
+    return bool(converted and converted.date() == target_date)
 
 
 def generate_daily_summary_text() -> str:
@@ -49,7 +50,7 @@ def generate_daily_summary_text() -> str:
     db = SessionLocal()
 
     try:
-        today = _today_iso()
+        today = _today_date()
         strategy_summary = get_all_strategy_bank_summary(db)
         summary_by_version = {
             item["decision_version"]: item
@@ -59,35 +60,40 @@ def generate_daily_summary_text() -> str:
         total_roi = get_total_roi(db)
 
         all_bets = db.query(PaperBet).order_by(PaperBet.id.desc()).all()
-        race_dates = _race_date_map(db, [bet.race_id for bet in all_bets])
-        todays_rows = [bet for bet in all_bets if race_dates.get(bet.race_id) == today]
-        todays_bets = enrich_paper_bets(db, todays_rows)
-        settled_today = [bet for bet in todays_bets if bet["settled_flag"]]
-        overall_stats = build_performance_stats(todays_bets)
-        version_breakdown = build_version_breakdown(todays_bets)
-        odds_breakdown = build_odds_bucket_breakdown(todays_bets)
-        edge_breakdown = build_edge_bucket_breakdown(todays_bets)
+        placed_today_rows = [bet for bet in all_bets if _is_same_brisbane_day(bet.placed_at, today)]
+        settled_today_rows = [
+            bet for bet in all_bets
+            if bool(bet.settled_flag) and _is_same_brisbane_day(getattr(bet, "settled_at", None), today)
+        ]
+        placed_today_bets = enrich_paper_bets(db, placed_today_rows)
+        settled_today_bets = enrich_paper_bets(db, settled_today_rows)
+        open_today_bets = [bet for bet in placed_today_bets if not bet["settled_flag"]]
+        placed_today_stats = build_performance_stats(placed_today_bets)
+        settled_today_stats = build_performance_stats(settled_today_bets)
+        version_breakdown = build_version_breakdown(placed_today_bets)
+        odds_breakdown = build_odds_bucket_breakdown(placed_today_bets)
+        edge_breakdown = build_edge_bucket_breakdown(placed_today_bets)
         v2_summary = summary_by_version.get(ACTIVE_DECISION_VERSION)
 
         best_bet = max(
-            settled_today,
+            settled_today_bets,
             key=lambda bet: bet["profit_loss"] or 0.0,
             default=None,
         )
         worst_bet = min(
-            settled_today,
+            settled_today_bets,
             key=lambda bet: bet["profit_loss"] or 0.0,
             default=None,
         )
 
         lines = [
-            f"Daily Summary | {today}",
+            f"Daily Summary | {today.isoformat()}",
             f"Combined Bank: ${combined_bank:.2f}",
             f"Combined ROI: {total_roi:.2%}",
-            f"Daily P/L: ${overall_stats['profit_loss']:.2f}",
-            f"Bets Today: {overall_stats['total_bets']}",
-            f"Wins/Losses: {overall_stats['wins']}/{overall_stats['losses']}",
-            f"Open Bets: {overall_stats['open_bets']}",
+            f"Daily P/L: ${settled_today_stats['profit_loss']:.2f}",
+            f"Bets Today: {placed_today_stats['total_bets']}",
+            f"Wins/Losses: {settled_today_stats['wins']}/{settled_today_stats['losses']}",
+            f"Open Bets: {len(open_today_bets)}",
         ]
 
         if v2_summary:
@@ -135,10 +141,10 @@ def generate_daily_summary_text() -> str:
                     f"P/L=${stats['profit_loss']:.2f} | ROI={stats['roi']:.2%}"
                 )
 
-        if overall_stats["clv_samples"]:
+        if settled_today_stats["clv_samples"]:
             lines.append(
-                f"Average CLV: {overall_stats['avg_clv']:+.2f}% "
-                f"across {overall_stats['clv_samples']} settled bets"
+                f"Average CLV: {settled_today_stats['avg_clv']:+.2f}% "
+                f"across {settled_today_stats['clv_samples']} settled bets"
             )
 
         if best_bet:
