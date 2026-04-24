@@ -13,6 +13,8 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_races_columns()
     _ensure_paper_bets_columns()
+    _ensure_paper_bet_archives_columns()
+    _ensure_paper_bank_resets_columns()
 
 
 def _ensure_races_columns() -> None:
@@ -40,9 +42,40 @@ def _ensure_paper_bets_columns() -> None:
             "final_observed_odds": "ALTER TABLE paper_bets ADD COLUMN final_observed_odds FLOAT",
             "closing_line_difference": "ALTER TABLE paper_bets ADD COLUMN closing_line_difference FLOAT",
             "closing_line_pct": "ALTER TABLE paper_bets ADD COLUMN closing_line_pct FLOAT",
+            "clv_percent": "ALTER TABLE paper_bets ADD COLUMN clv_percent FLOAT",
             "beat_closing_line": "ALTER TABLE paper_bets ADD COLUMN beat_closing_line BOOLEAN",
             "placed_at": "ALTER TABLE paper_bets ADD COLUMN placed_at DATETIME",
             "settled_at": "ALTER TABLE paper_bets ADD COLUMN settled_at DATETIME",
+        }
+
+        for column_name, ddl in required_columns.items():
+            if column_name not in columns:
+                connection.execute(text(ddl))
+
+
+def _ensure_paper_bank_resets_columns() -> None:
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(paper_bank_resets)"))
+        }
+        required_columns = {
+            "decision_version": "ALTER TABLE paper_bank_resets ADD COLUMN decision_version VARCHAR",
+        }
+
+        for column_name, ddl in required_columns.items():
+            if column_name not in columns:
+                connection.execute(text(ddl))
+
+
+def _ensure_paper_bet_archives_columns() -> None:
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(paper_bet_archives)"))
+        }
+        required_columns = {
+            "clv_percent": "ALTER TABLE paper_bet_archives ADD COLUMN clv_percent FLOAT",
         }
 
         for column_name, ddl in required_columns.items():

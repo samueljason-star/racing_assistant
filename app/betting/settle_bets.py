@@ -8,7 +8,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.betting.bet_details import enrich_paper_bets
 from app.betting.market_helpers import closing_line_metrics
-from app.betting.paper_bank import get_current_bank
+from app.betting.paper_bank import get_strategy_bank
 from app.db import SessionLocal, init_db
 from app.models import OddsSnapshot, PaperBet, Result
 from app.notifier.telegram import send_telegram_message
@@ -37,7 +37,6 @@ def settle_bets():
         bets_settled = 0
         wins = 0
         losses = 0
-        current_bank = get_current_bank(db)
 
         unsettled_bets = db.query(PaperBet).filter(PaperBet.settled_flag == False).all()
 
@@ -65,13 +64,14 @@ def settle_bets():
             bet.final_observed_odds = final_observed_odds
             bet.closing_line_difference = clv["closing_line_difference"]
             bet.closing_line_pct = clv["closing_line_pct"]
+            bet.clv_percent = clv["clv_percent"]
             bet.beat_closing_line = clv["beat_closing_line"]
             bet.settled_flag = True
             bet.settled_at = datetime.utcnow()
             bets_settled += 1
-            current_bank = round(current_bank + (bet.profit_loss or 0.0), 2)
 
             bet_detail = enrich_paper_bets(db, [bet])[0]
+            strategy_bank = get_strategy_bank(db, bet.decision_version or "unknown")
             message_lines = [
                 "Paper Bet Settled",
                 f"Horse: {bet_detail['horse_name']}",
@@ -85,19 +85,15 @@ def settle_bets():
                 message_lines.append(
                     f"Final Odds: {bet_detail['final_observed_odds']:.2f}"
                 )
-            if bet_detail["closing_line_difference"] is not None:
+            if bet_detail["clv_percent"] is not None:
                 message_lines.append(
-                    f"CLV Diff: {bet_detail['closing_line_difference']:+.2f}"
-                )
-            if bet_detail["beat_closing_line"] is not None:
-                message_lines.append(
-                    f"Beat Closing Line: {bet_detail['beat_closing_line']}"
+                    f"CLV Percent: {bet_detail['clv_percent']:+.2f}%"
                 )
             message_lines.extend(
                 [
                     f"Stake: ${bet_detail['stake']:.2f}",
                     f"Profit/Loss: ${bet_detail['profit_loss']:.2f}",
-                    f"Current Bank: ${current_bank:.2f}",
+                    f"Strategy Bank: ${strategy_bank:.2f}",
                 ]
             )
             send_telegram_message("\n".join(message_lines))

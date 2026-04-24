@@ -25,12 +25,8 @@ def main() -> None:
         else:
             print("Brier score: N/A")
         print("")
-        print(
-            "Bucket   Count  Avg Pred  Actual Win  Avg Market  Avg Edge"
-        )
-        print(
-            "-------  -----  --------  ----------  ----------  --------"
-        )
+        print("Bucket   Count  Avg Pred  Actual Win  Avg Market  Avg Edge  Brier")
+        print("-------  -----  --------  ----------  ----------  --------  -----")
         for bucket in summary["bucket_summaries"]:
             avg_market = (
                 f"{bucket['avg_market_probability']:.4f}"
@@ -48,7 +44,8 @@ def main() -> None:
                 f"{bucket['avg_predicted_probability']:.4f}    "
                 f"{bucket['actual_win_rate']:.4f}      "
                 f"{avg_market:>10}  "
-                f"{avg_edge:>8}"
+                f"{avg_edge:>8}  "
+                f"{bucket['brier_score']:.4f}"
             )
     finally:
         db.close()

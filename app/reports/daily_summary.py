@@ -11,20 +11,17 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.betting.bet_details import enrich_paper_bets
 from app.betting.paper_bank import (
-    STARTING_BANK,
-    get_bank_since_reset,
-    get_current_bank,
-    get_lifetime_bank,
+    get_all_strategy_bank_summary,
+    get_combined_bank,
     get_total_roi,
 )
+from app.config import ACTIVE_DECISION_VERSION
 from app.db import SessionLocal, init_db
 from app.models import Meeting, PaperBet, Race
-from app.reports.calibration_utils import collect_calibration_rows, summarize_calibration
 from app.reports.performance import (
-    build_label_breakdown,
+    build_edge_bucket_breakdown,
     build_odds_bucket_breakdown,
     build_performance_stats,
-    build_status_breakdown,
     build_version_breakdown,
 )
 
@@ -48,135 +45,106 @@ def _race_date_map(db, race_ids):
 
 
 def generate_daily_summary_text() -> str:
-    """Return a Telegram-friendly summary of today's paper betting performance."""
     init_db()
     db = SessionLocal()
 
     try:
         today = _today_iso()
-        current_bank = get_current_bank(db)
-        bank_since_reset = get_bank_since_reset(db)
-        lifetime_bank = get_lifetime_bank(db)
+        strategy_summary = get_all_strategy_bank_summary(db)
+        summary_by_version = {
+            item["decision_version"]: item
+            for item in strategy_summary
+        }
+        combined_bank = get_combined_bank(db)
         total_roi = get_total_roi(db)
 
         all_bets = db.query(PaperBet).order_by(PaperBet.id.desc()).all()
         race_dates = _race_date_map(db, [bet.race_id for bet in all_bets])
-
-        todays_bets = [bet for bet in all_bets if race_dates.get(bet.race_id) == today]
-        settled_today = [
-            bet for bet in todays_bets if bet.settled_flag and bet.profit_loss is not None
-        ]
-        open_today = [bet for bet in todays_bets if not bet.settled_flag]
-        enriched_settled_today = enrich_paper_bets(db, settled_today)
-        enriched_all_bets = enrich_paper_bets(db, all_bets)
-        open_bets = sum(1 for bet in all_bets if not bet.settled_flag)
-        overall_stats = build_performance_stats(settled_today)
-        version_breakdown = build_version_breakdown(settled_today)
-        odds_breakdown = build_odds_bucket_breakdown(settled_today)
-        status_breakdown = build_status_breakdown(open_today, settled_today)
-        track_labels = {
-            bet["id"]: bet["track"] or "Unknown"
-            for bet in enriched_all_bets
-        }
-        race_type_labels = {
-            bet["id"]: bet["race_type"] or bet["meeting_type"] or "Unknown"
-            for bet in enriched_all_bets
-        }
-        track_breakdown = build_label_breakdown(settled_today, track_labels, limit=5)
-        race_type_breakdown = build_label_breakdown(settled_today, race_type_labels, limit=5)
-        calibration = summarize_calibration(collect_calibration_rows(db))
+        todays_rows = [bet for bet in all_bets if race_dates.get(bet.race_id) == today]
+        todays_bets = enrich_paper_bets(db, todays_rows)
+        settled_today = [bet for bet in todays_bets if bet["settled_flag"]]
+        overall_stats = build_performance_stats(todays_bets)
+        version_breakdown = build_version_breakdown(todays_bets)
+        odds_breakdown = build_odds_bucket_breakdown(todays_bets)
+        edge_breakdown = build_edge_bucket_breakdown(todays_bets)
+        v2_summary = summary_by_version.get(ACTIVE_DECISION_VERSION)
 
         best_bet = max(
-            enriched_settled_today,
+            settled_today,
             key=lambda bet: bet["profit_loss"] or 0.0,
             default=None,
         )
         worst_bet = min(
-            enriched_settled_today,
+            settled_today,
             key=lambda bet: bet["profit_loss"] or 0.0,
             default=None,
         )
 
         lines = [
             f"Daily Summary | {today}",
-            f"Starting Bank: ${STARTING_BANK:.2f}",
-            f"Current Bank: ${current_bank:.2f}",
-            f"Lifetime Bank: ${lifetime_bank:.2f}",
-            f"Bank Since Reset: ${bank_since_reset:.2f}",
+            f"Combined Bank: ${combined_bank:.2f}",
+            f"Combined ROI: {total_roi:.2%}",
             f"Daily P/L: ${overall_stats['profit_loss']:.2f}",
-            f"Total Bets Today: {len(todays_bets)}",
-            f"Open Bets Total: {open_bets}",
-            f"Total ROI: {total_roi:.2%}",
-            (
-                "Status Split: "
-                f"open={status_breakdown['open']['total_bets']} | "
-                f"settled={status_breakdown['settled']['total_bets']} | "
-                f"open_exposure=${status_breakdown['open']['stake_exposure']:.2f}"
-            ),
-            (
-                "Settled Today: "
-                f"bets={overall_stats['total_bets']} | "
-                f"wins={overall_stats['wins']} | "
-                f"losses={overall_stats['losses']} | "
-                f"P/L=${overall_stats['profit_loss']:.2f} | "
-                f"ROI={overall_stats['roi']:.2%}"
-            ),
+            f"Bets Today: {overall_stats['total_bets']}",
+            f"Wins/Losses: {overall_stats['wins']}/{overall_stats['losses']}",
+            f"Open Bets: {overall_stats['open_bets']}",
         ]
 
-        if overall_stats["clv_samples"]:
+        if v2_summary:
             lines.append(
-                "CLV: "
-                f"samples={overall_stats['clv_samples']} | "
-                f"avg_diff={overall_stats['avg_clv_diff']:+.4f} | "
-                f"beat_rate={overall_stats['beat_clv_rate']:.2%}"
+                "model_edge_v2: "
+                f"start=${v2_summary['starting_bank']:.2f} | "
+                f"bank=${v2_summary['current_bank']:.2f} | "
+                f"P/L=${v2_summary['profit_loss']:.2f} | "
+                f"ROI={v2_summary['roi']:.2%}"
+            )
+
+        lines.append("Strategy Banks:")
+        for item in strategy_summary:
+            lines.append(
+                f"- {item['decision_version']}: "
+                f"start=${item['starting_bank']:.2f} | "
+                f"bank=${item['current_bank']:.2f} | "
+                f"P/L=${item['profit_loss']:.2f} | "
+                f"ROI={item['roi']:.2%} | "
+                f"open={item['open_bets']} | settled={item['settled_bets']}"
             )
 
         if version_breakdown:
-            lines.append("By Strategy Version:")
+            lines.append("Today By Version:")
             for version, stats in version_breakdown.items():
                 lines.append(
                     f"- {version}: bets={stats['total_bets']} | "
                     f"wins={stats['wins']} | losses={stats['losses']} | "
-                    f"P/L=${stats['profit_loss']:.2f} | ROI={stats['roi']:.2%}"
+                    f"ROI={stats['roi']:.2%} | avg_clv={stats['avg_clv']:+.2f}%"
                 )
 
         if odds_breakdown:
-            lines.append("By Odds Bucket:")
+            lines.append("Today By Odds Bucket:")
             for bucket, stats in odds_breakdown.items():
                 lines.append(
                     f"- {bucket}: bets={stats['total_bets']} | "
-                    f"wins={stats['wins']} | losses={stats['losses']} | "
                     f"P/L=${stats['profit_loss']:.2f} | ROI={stats['roi']:.2%}"
                 )
 
-        if track_breakdown:
-            lines.append("Top Tracks:")
-            for track, stats in track_breakdown.items():
+        if edge_breakdown:
+            lines.append("Today By Edge Bucket:")
+            for bucket, stats in edge_breakdown.items():
                 lines.append(
-                    f"- {track}: bets={stats['total_bets']} | "
+                    f"- {bucket}: bets={stats['total_bets']} | "
                     f"P/L=${stats['profit_loss']:.2f} | ROI={stats['roi']:.2%}"
                 )
 
-        if race_type_breakdown:
-            lines.append("Top Race Types:")
-            for race_type, stats in race_type_breakdown.items():
-                lines.append(
-                    f"- {race_type}: bets={stats['total_bets']} | "
-                    f"P/L=${stats['profit_loss']:.2f} | ROI={stats['roi']:.2%}"
-                )
-
-        if calibration["brier_score"] is not None:
+        if overall_stats["clv_samples"]:
             lines.append(
-                f"Calibration: Brier={calibration['brier_score']:.4f} | "
-                f"Buckets={len(calibration['bucket_summaries'])}"
+                f"Average CLV: {overall_stats['avg_clv']:+.2f}% "
+                f"across {overall_stats['clv_samples']} settled bets"
             )
 
         if best_bet:
             lines.append(
-                "Best Bet: "
-                f"{best_bet['horse_name']} | "
-                f"race {best_bet['race_id']} | "
-                f"odds {best_bet['odds_taken']:.2f} | "
+                f"Best Bet: {best_bet['horse_name']} | "
+                f"{best_bet['decision_version']} | "
                 f"P/L ${best_bet['profit_loss']:.2f}"
             )
         else:
@@ -184,10 +152,8 @@ def generate_daily_summary_text() -> str:
 
         if worst_bet:
             lines.append(
-                "Worst Bet: "
-                f"{worst_bet['horse_name']} | "
-                f"race {worst_bet['race_id']} | "
-                f"odds {worst_bet['odds_taken']:.2f} | "
+                f"Worst Bet: {worst_bet['horse_name']} | "
+                f"{worst_bet['decision_version']} | "
                 f"P/L ${worst_bet['profit_loss']:.2f}"
             )
         else:

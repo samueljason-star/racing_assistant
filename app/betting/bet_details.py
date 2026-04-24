@@ -1,4 +1,4 @@
-from app.betting.market_helpers import odds_bucket_label
+from app.betting.market_helpers import edge_bucket_label, odds_bucket_label, raw_market_probability
 from app.models import Meeting, Race, Runner
 
 
@@ -53,6 +53,7 @@ def enrich_paper_bets(db, bets):
                 "runner_id": bet.runner_id,
                 "odds_taken": bet.odds_taken,
                 "stake": bet.stake,
+                "raw_market_probability": raw_market_probability(bet.odds_taken),
                 "market_probability": bet.market_probability,
                 "model_probability": bet.model_probability,
                 "edge": bet.edge,
@@ -67,8 +68,10 @@ def enrich_paper_bets(db, bets):
                 "final_observed_odds": getattr(bet, "final_observed_odds", None),
                 "closing_line_difference": getattr(bet, "closing_line_difference", None),
                 "closing_line_pct": getattr(bet, "closing_line_pct", None),
+                "clv_percent": getattr(bet, "clv_percent", getattr(bet, "closing_line_pct", None)),
                 "beat_closing_line": getattr(bet, "beat_closing_line", None),
                 "odds_bucket": odds_bucket_label(bet.odds_taken),
+                "edge_bucket": edge_bucket_label(bet.edge),
             }
         )
 

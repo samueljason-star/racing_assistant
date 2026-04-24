@@ -76,7 +76,7 @@ def summarize_calibration(rows):
     for row in rows:
         bucket_rows[row["bucket"]].append(row)
 
-    bucket_order = ["0-3", "3-5", "5-8", "8-12", "12-20", "20+", "unknown"]
+    bucket_order = ["0-3", "3-5", "5-8", "8-10", "10-15", "15+", "unknown"]
     summaries = []
 
     for bucket in bucket_order:
@@ -99,6 +99,10 @@ def summarize_calibration(rows):
                     sum(market_values) / len(market_values) if market_values else None
                 ),
                 "avg_edge": sum(edge_values) / len(edge_values) if edge_values else None,
+                "brier_score": sum(
+                    (row["predicted_probability"] - row["actual_win"]) ** 2
+                    for row in values
+                ) / count,
             }
         )
 

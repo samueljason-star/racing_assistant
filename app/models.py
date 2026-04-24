@@ -141,6 +141,7 @@ class PaperBet(Base):
     final_observed_odds = Column(Float, nullable=True)
     closing_line_difference = Column(Float, nullable=True)
     closing_line_pct = Column(Float, nullable=True)
+    clv_percent = Column(Float, nullable=True)
     beat_closing_line = Column(Boolean, nullable=True)
     placed_at = Column(DateTime, default=datetime.utcnow)
     settled_at = Column(DateTime, nullable=True)
@@ -151,6 +152,7 @@ class PaperBankReset(Base):
 
     id = Column(Integer, primary_key=True)
     reset_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    decision_version = Column(String, nullable=True)
     baseline_bank = Column(Float, nullable=False, default=10000.0)
     archived_bet_count = Column(Integer, nullable=False, default=0)
     archived_profit_loss = Column(Float, nullable=False, default=0.0)
@@ -180,6 +182,7 @@ class PaperBetArchive(Base):
     final_observed_odds = Column(Float, nullable=True)
     closing_line_difference = Column(Float, nullable=True)
     closing_line_pct = Column(Float, nullable=True)
+    clv_percent = Column(Float, nullable=True)
     beat_closing_line = Column(Boolean, nullable=True)
     placed_at = Column(DateTime, nullable=True)
     settled_at = Column(DateTime, nullable=True)
