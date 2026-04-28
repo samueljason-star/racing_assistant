@@ -134,11 +134,14 @@ def _parse_result_table(table):
         horse_name = cells[header_index["Horse"]]
         if not horse_name:
             continue
+        finish_position = _parse_finish_position(cells[header_index["Finish"]])
+        if finish_position is None:
+            continue
 
         parsed_rows.append(
             {
                 "horse_name": horse_name,
-                "finish_position": _parse_finish_position(cells[header_index["Finish"]]),
+                "finish_position": finish_position,
                 "margin": _parse_margin(cells[header_index["Margin"]]) if "Margin" in header_index else None,
                 "starting_price": _parse_starting_price(cells[header_index["Starting Price"]]) if "Starting Price" in header_index else None,
             }
@@ -350,6 +353,8 @@ def update_results():
         results_upserted = 0
         history_rows_added = 0
         runners_unmatched = 0
+        races_with_real_results = 0
+        unmatched_samples = []
         calendar_cache = {}
         page_cache = {}
 
@@ -365,6 +370,7 @@ def update_results():
             if not result_rows:
                 races_skipped_no_real_result += 1
                 continue
+            races_with_real_results += 1
 
             for result_row in result_rows:
                 if result_row.get("finish_position") is None:
@@ -372,6 +378,16 @@ def update_results():
                 runner = find_matching_runner(db, race.id, result_row["horse_name"])
                 if not runner:
                     runners_unmatched += 1
+                    if len(unmatched_samples) < 10:
+                        meeting = getattr(race, "meeting", None)
+                        unmatched_samples.append(
+                            {
+                                "race_id": race.id,
+                                "track": meeting.track if meeting else None,
+                                "race_number": race.race_number,
+                                "horse_name": result_row["horse_name"],
+                            }
+                        )
                     continue
 
                 _, created = upsert_result(db, race.id, runner.id, result_row)
@@ -386,10 +402,20 @@ def update_results():
         db.commit()
 
         print(f"COMPLETED RACES CHECKED: {len(completed_races)}")
+        print(f"RACES WITH REAL RESULT PAGE: {races_with_real_results}")
         print(f"RACES SKIPPED DUE TO NO REAL RESULT: {races_skipped_no_real_result}")
         print(f"RESULTS UPSERTED: {results_upserted}")
         print(f"HORSE HISTORY ROWS ADDED: {history_rows_added}")
         print(f"RUNNERS UNMATCHED: {runners_unmatched}")
+        if unmatched_samples:
+            print("UNMATCHED RESULT ROW SAMPLES:")
+            for sample in unmatched_samples:
+                print(
+                    f"race_id={sample['race_id']} | "
+                    f"track={sample['track'] or 'Unknown'} | "
+                    f"race_number={sample['race_number']} | "
+                    f"horse={sample['horse_name']}"
+                )
     finally:
         db.close()
 
