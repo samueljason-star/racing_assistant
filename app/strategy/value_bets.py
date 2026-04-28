@@ -34,6 +34,25 @@ def race_already_has_bet(db, race_id):
     return existing_bet is not None
 
 
+def _parse_jump_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _is_upcoming_race(race) -> bool:
+    jump_time = _parse_jump_time(race.jump_time)
+    if not jump_time:
+        return False
+    return jump_time > datetime.now(timezone.utc)
+
+
 def get_latest_odds(db, runner_id):
     snapshot = (
         db.query(OddsSnapshot)
@@ -56,6 +75,7 @@ def _recent_history_rows(db, horse_name: str):
     return (
         db.query(HorseHistory)
         .filter(HorseHistory.horse_name == horse_name)
+        .filter(HorseHistory.source != "results_pipeline")
         .order_by(HorseHistory.run_date.desc(), HorseHistory.id.desc())
         .limit(3)
         .all()
@@ -268,6 +288,8 @@ def create_paper_bet(db, race, chosen_runner, stake):
         settled_flag=False,
         decision_version=DECISION_VERSION,
         paper_bank_reset_id=latest_reset.id if latest_reset else None,
+        proposed_notified_at=None,
+        settlement_notified_at=None,
     )
     db.add(paper_bet)
     return paper_bet
@@ -302,6 +324,8 @@ def create_value_bets():
         race_best_candidates = []
 
         for race in races:
+            if not _is_upcoming_race(race):
+                continue
             races_checked += 1
 
             if race_already_has_bet(db, race.id):
@@ -329,11 +353,15 @@ def create_value_bets():
             bet_detail = enrich_paper_bets(db, [paper_bet])[0]
             strategy_bank = get_strategy_bank(db, DECISION_VERSION)
             message = (
-                "New Paper Bet\n"
+                "PROPOSED BET\n"
                 f"Horse: {bet_detail['horse_name']}\n"
+                f"Track/Race: {bet_detail['track'] or 'Unknown'} R{bet_detail['race_number'] or '?'}\n"
+                f"Race Time: {bet_detail['jump_time'] or 'Unknown'}\n"
                 f"Race ID: {bet_detail['race_id']}\n"
                 f"Odds Taken: {bet_detail['odds_taken']:.2f}\n"
                 f"Stake: ${bet_detail['stake']:.2f}\n"
+                f"Model Probability: {chosen['model_probability']:.4f}\n"
+                f"Adj Market Probability: {chosen['market_probability']:.4f}\n"
                 f"Edge: {chosen['edge']:.4f}\n"
                 f"Form Score: {chosen['form_score']:.4f}\n"
                 f"Combined Score: {chosen['combined_score']:.4f}\n"
@@ -341,7 +369,8 @@ def create_value_bets():
                 f"Version: {DECISION_VERSION}\n"
                 f"Strategy Bank: ${strategy_bank:.2f}"
             )
-            send_telegram_message(message)
+            if send_telegram_message(message):
+                paper_bet.proposed_notified_at = datetime.utcnow()
 
         db.commit()
 

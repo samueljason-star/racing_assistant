@@ -151,6 +151,8 @@ class PaperBet(Base):
     beat_closing_line = Column(Boolean, nullable=True)
     placed_at = Column(DateTime, default=datetime.utcnow)
     settled_at = Column(DateTime, nullable=True)
+    proposed_notified_at = Column(DateTime, nullable=True)
+    settlement_notified_at = Column(DateTime, nullable=True)
 
 
 class PaperBankReset(Base):
@@ -198,5 +200,7 @@ class PaperBetArchive(Base):
     beat_closing_line = Column(Boolean, nullable=True)
     placed_at = Column(DateTime, nullable=True)
     settled_at = Column(DateTime, nullable=True)
+    proposed_notified_at = Column(DateTime, nullable=True)
+    settlement_notified_at = Column(DateTime, nullable=True)
     archived_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     archived_reason = Column(String, nullable=True)

@@ -29,6 +29,7 @@ def get_race_context_map(db, race_ids):
             "race_number": race.race_number,
             "meeting_type": meeting.meeting_type if meeting else None,
             "race_type": race.class_name,
+            "jump_time": race.jump_time,
         }
     return context
 
@@ -50,6 +51,7 @@ def enrich_paper_bets(db, bets):
                 "race_number": race_context.get("race_number"),
                 "meeting_type": race_context.get("meeting_type"),
                 "race_type": race_context.get("race_type"),
+                "jump_time": race_context.get("jump_time"),
                 "runner_id": bet.runner_id,
                 "odds_taken": bet.odds_taken,
                 "stake": bet.stake,
@@ -69,6 +71,8 @@ def enrich_paper_bets(db, bets):
                 "result": bet.result,
                 "profit_loss": bet.profit_loss,
                 "settled_flag": bet.settled_flag,
+                "placed_at": getattr(bet, "placed_at", None),
+                "settled_at": getattr(bet, "settled_at", None),
                 "paper_bank_reset_id": getattr(bet, "paper_bank_reset_id", None),
                 "closing_odds": getattr(bet, "closing_odds", None),
                 "final_observed_odds": getattr(bet, "final_observed_odds", None),
@@ -76,6 +80,8 @@ def enrich_paper_bets(db, bets):
                 "closing_line_pct": getattr(bet, "closing_line_pct", None),
                 "clv_percent": getattr(bet, "clv_percent", getattr(bet, "closing_line_pct", None)),
                 "beat_closing_line": getattr(bet, "beat_closing_line", None),
+                "proposed_notified_at": getattr(bet, "proposed_notified_at", None),
+                "settlement_notified_at": getattr(bet, "settlement_notified_at", None),
                 "odds_bucket": odds_bucket_label(bet.odds_taken),
                 "edge_bucket": edge_bucket_label(bet.edge),
             }

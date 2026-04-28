@@ -1,5 +1,5 @@
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -10,11 +10,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.betting.bet_details import enrich_paper_bets
-from app.betting.paper_bank import (
-    ACTIVE_DECISION_VERSION,
-    get_all_strategy_bank_summary,
-    get_combined_bank,
-)
+from app.betting.paper_bank import ACTIVE_DECISION_VERSION, get_all_strategy_bank_summary
 from app.db import SessionLocal, init_db
 from app.models import Meeting, PaperBet, Race
 from app.reports.performance import (
@@ -171,7 +167,7 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="stats">
-      <div class="card"><div class="label">Combined Bank</div><div class="value">${{ combined_bank }}</div></div>
+      <div class="card"><div class="label">Active Strategy Bank</div><div class="value">${{ active_bank }}</div></div>
       <div class="card"><div class="label">model_edge_v2 Bank</div><div class="value">${{ v2_bank }}</div></div>
       <div class="card"><div class="label">model_edge_v2 P/L</div><div class="value {% if v2_profit_loss < 0 %}negative{% else %}positive{% endif %}">${{ v2_profit_loss_fmt }}</div></div>
       <div class="card"><div class="label">model_edge_v2 ROI</div><div class="value">{{ v2_roi }}</div></div>
@@ -208,7 +204,7 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="section">
-      <h2>Performance By Version</h2>
+      <h2>Active Version Performance</h2>
       <div class="grid-3">
         {% for version, stats in version_stats.items() %}
         <div class="card">
@@ -330,6 +326,19 @@ def _meeting_date_map(db, race_ids):
     return {race.id: meeting_map.get(race.meeting_id) for race in races}
 
 
+def _to_brisbane(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(BRISBANE_TZ)
+
+
+def _is_same_brisbane_day(value, target_date) -> bool:
+    converted = _to_brisbane(value)
+    return bool(converted and converted.date() == target_date)
+
+
 @app.route("/")
 def index():
     init_db()
@@ -337,25 +346,34 @@ def index():
 
     try:
         all_rows = db.query(PaperBet).order_by(PaperBet.id.desc()).all()
-        all_bets = enrich_paper_bets(db, all_rows)
-        open_bets = [bet for bet in all_bets if not bet["settled_flag"]]
+        active_rows = [
+            bet for bet in all_rows
+            if (bet.decision_version or ACTIVE_DECISION_VERSION) == ACTIVE_DECISION_VERSION
+        ]
+        active_bets = enrich_paper_bets(db, active_rows)
+        open_bets = [bet for bet in active_bets if not bet["settled_flag"]]
         strategy_summary = get_all_strategy_bank_summary(db)
         summary_by_version = {
             item["decision_version"]: item
             for item in strategy_summary
         }
-        current_date = datetime.now(BRISBANE_TZ).date().isoformat()
-        race_date_map = _meeting_date_map(db, [bet["race_id"] for bet in all_bets])
-        todays_bets = [bet for bet in all_bets if race_date_map.get(bet["race_id"]) == current_date]
+        current_date = datetime.now(BRISBANE_TZ).date()
+        todays_bets = [bet for bet in active_bets if _is_same_brisbane_day(bet.get("placed_at"), current_date)]
+        settled_today = [
+            bet for bet in active_bets
+            if bet["settled_flag"] and _is_same_brisbane_day(bet.get("settled_at"), current_date)
+        ]
         todays_stats = build_performance_stats(todays_bets)
-        version_stats = build_version_breakdown(all_bets)
-        odds_bucket_stats = build_odds_bucket_breakdown(all_bets)
-        edge_bucket_stats = build_edge_bucket_breakdown(all_bets)
+        settled_today_stats = build_performance_stats(settled_today)
+        todays_stats["profit_loss"] = settled_today_stats["profit_loss"]
+        version_stats = build_version_breakdown(active_bets)
+        odds_bucket_stats = build_odds_bucket_breakdown(active_bets)
+        edge_bucket_stats = build_edge_bucket_breakdown(active_bets)
         v2_summary = summary_by_version.get(ACTIVE_DECISION_VERSION, {})
 
         return render_template_string(
             HTML_TEMPLATE,
-            combined_bank=f"{get_combined_bank(db):.2f}",
+            active_bank=f"{v2_summary.get('current_bank', 0.0):.2f}",
             v2_bank=f"{v2_summary.get('current_bank', 0.0):.2f}",
             v2_profit_loss=v2_summary.get("profit_loss", 0.0),
             v2_profit_loss_fmt=f"{v2_summary.get('profit_loss', 0.0):.2f}",
@@ -367,7 +385,7 @@ def index():
             version_stats=version_stats,
             odds_bucket_stats=odds_bucket_stats,
             edge_bucket_stats=edge_bucket_stats,
-            recent_bets=all_bets[:20],
+            recent_bets=active_bets[:20],
         )
     finally:
         db.close()

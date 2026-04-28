@@ -37,20 +37,8 @@ def get_completed_races(db):
 
 
 def fetch_result_data_for_race(race):
-    """Return mocked structured result data for a race."""
-    # TODO: Replace this mock with a real external results source once the
-    # production provider and parsing logic are finalized.
-    ordered_runners = sorted(getattr(race, "runners", []), key=lambda runner: runner.id)
-
-    return [
-        {
-            "horse_name": runner.horse_name,
-            "finish_position": index,
-            "margin": 0.0 if index == 1 else round((index - 1) * 0.5, 2),
-            "starting_price": None,
-        }
-        for index, runner in enumerate(ordered_runners, start=1)
-    ]
+    """Return real structured result data for a race when available."""
+    return None
 
 
 def find_matching_runner(db, race_id, horse_name):
@@ -145,14 +133,20 @@ def update_results():
 
     try:
         completed_races = get_completed_races(db)
+        races_skipped_no_real_result = 0
         results_upserted = 0
         history_rows_added = 0
         runners_unmatched = 0
 
         for race in completed_races:
             result_rows = fetch_result_data_for_race(race)
+            if not result_rows:
+                races_skipped_no_real_result += 1
+                continue
 
             for result_row in result_rows:
+                if result_row.get("finish_position") is None:
+                    continue
                 runner = find_matching_runner(db, race.id, result_row["horse_name"])
                 if not runner:
                     runners_unmatched += 1
@@ -170,6 +164,7 @@ def update_results():
         db.commit()
 
         print(f"COMPLETED RACES CHECKED: {len(completed_races)}")
+        print(f"RACES SKIPPED DUE TO NO REAL RESULT: {races_skipped_no_real_result}")
         print(f"RESULTS UPSERTED: {results_upserted}")
         print(f"HORSE HISTORY ROWS ADDED: {history_rows_added}")
         print(f"RUNNERS UNMATCHED: {runners_unmatched}")

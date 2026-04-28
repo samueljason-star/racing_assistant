@@ -60,13 +60,24 @@ def generate_daily_summary_text() -> str:
         total_roi = get_total_roi(db)
 
         all_bets = db.query(PaperBet).order_by(PaperBet.id.desc()).all()
+        active_rows = [
+            bet for bet in all_bets
+            if (bet.decision_version or ACTIVE_DECISION_VERSION) == ACTIVE_DECISION_VERSION
+        ]
         placed_today_rows = [bet for bet in all_bets if _is_same_brisbane_day(bet.placed_at, today)]
         settled_today_rows = [
             bet for bet in all_bets
             if bool(bet.settled_flag) and _is_same_brisbane_day(getattr(bet, "settled_at", None), today)
         ]
-        placed_today_bets = enrich_paper_bets(db, placed_today_rows)
-        settled_today_bets = enrich_paper_bets(db, settled_today_rows)
+        active_placed_today_rows = [
+            bet for bet in active_rows if _is_same_brisbane_day(bet.placed_at, today)
+        ]
+        active_settled_today_rows = [
+            bet for bet in active_rows
+            if bool(bet.settled_flag) and _is_same_brisbane_day(getattr(bet, "settled_at", None), today)
+        ]
+        placed_today_bets = enrich_paper_bets(db, active_placed_today_rows)
+        settled_today_bets = enrich_paper_bets(db, active_settled_today_rows)
         open_today_bets = [bet for bet in placed_today_bets if not bet["settled_flag"]]
         placed_today_stats = build_performance_stats(placed_today_bets)
         settled_today_stats = build_performance_stats(settled_today_bets)
@@ -88,8 +99,8 @@ def generate_daily_summary_text() -> str:
 
         lines = [
             f"Daily Summary | {today.isoformat()}",
-            f"Combined Bank: ${combined_bank:.2f}",
-            f"Combined ROI: {total_roi:.2%}",
+            f"{ACTIVE_DECISION_VERSION} Bank: ${v2_summary['current_bank']:.2f}" if v2_summary else f"{ACTIVE_DECISION_VERSION} Bank: $0.00",
+            f"{ACTIVE_DECISION_VERSION} ROI: {v2_summary['roi']:.2%}" if v2_summary else f"{ACTIVE_DECISION_VERSION} ROI: 0.00%",
             f"Daily P/L: ${settled_today_stats['profit_loss']:.2f}",
             f"Bets Today: {placed_today_stats['total_bets']}",
             f"Wins/Losses: {settled_today_stats['wins']}/{settled_today_stats['losses']}",
@@ -98,15 +109,25 @@ def generate_daily_summary_text() -> str:
 
         if v2_summary:
             lines.append(
-                "model_edge_v2: "
+                f"{ACTIVE_DECISION_VERSION}: "
                 f"start=${v2_summary['starting_bank']:.2f} | "
                 f"bank=${v2_summary['current_bank']:.2f} | "
                 f"P/L=${v2_summary['profit_loss']:.2f} | "
                 f"ROI={v2_summary['roi']:.2%}"
             )
 
-        lines.append("Strategy Banks:")
-        for item in strategy_summary:
+        legacy_items = [
+            item for item in strategy_summary
+            if item["decision_version"] != ACTIVE_DECISION_VERSION
+        ]
+        if legacy_items:
+            lines.append(
+                f"Other Versions Combined: bank=${combined_bank:.2f} | total_roi={total_roi:.2%}"
+            )
+
+        if legacy_items:
+            lines.append("Other Strategy Banks:")
+        for item in legacy_items:
             lines.append(
                 f"- {item['decision_version']}: "
                 f"start=${item['starting_bank']:.2f} | "
@@ -150,7 +171,7 @@ def generate_daily_summary_text() -> str:
         if best_bet:
             lines.append(
                 f"Best Bet: {best_bet['horse_name']} | "
-                f"{best_bet['decision_version']} | "
+                f"{ACTIVE_DECISION_VERSION} | "
                 f"P/L ${best_bet['profit_loss']:.2f}"
             )
         else:
@@ -159,7 +180,7 @@ def generate_daily_summary_text() -> str:
         if worst_bet:
             lines.append(
                 f"Worst Bet: {worst_bet['horse_name']} | "
-                f"{worst_bet['decision_version']} | "
+                f"{ACTIVE_DECISION_VERSION} | "
                 f"P/L ${worst_bet['profit_loss']:.2f}"
             )
         else:

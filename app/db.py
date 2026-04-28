@@ -52,6 +52,8 @@ def _ensure_paper_bets_columns() -> None:
             "beat_closing_line": "ALTER TABLE paper_bets ADD COLUMN beat_closing_line BOOLEAN",
             "placed_at": "ALTER TABLE paper_bets ADD COLUMN placed_at DATETIME",
             "settled_at": "ALTER TABLE paper_bets ADD COLUMN settled_at DATETIME",
+            "proposed_notified_at": "ALTER TABLE paper_bets ADD COLUMN proposed_notified_at DATETIME",
+            "settlement_notified_at": "ALTER TABLE paper_bets ADD COLUMN settlement_notified_at DATETIME",
         }
 
         for column_name, ddl in required_columns.items():
@@ -88,6 +90,8 @@ def _ensure_paper_bet_archives_columns() -> None:
             "last_start_finish": "ALTER TABLE paper_bet_archives ADD COLUMN last_start_finish FLOAT",
             "avg_last3_finish": "ALTER TABLE paper_bet_archives ADD COLUMN avg_last3_finish FLOAT",
             "avg_last3_margin": "ALTER TABLE paper_bet_archives ADD COLUMN avg_last3_margin FLOAT",
+            "proposed_notified_at": "ALTER TABLE paper_bet_archives ADD COLUMN proposed_notified_at DATETIME",
+            "settlement_notified_at": "ALTER TABLE paper_bet_archives ADD COLUMN settlement_notified_at DATETIME",
         }
 
         for column_name, ddl in required_columns.items():

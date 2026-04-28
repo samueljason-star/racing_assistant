@@ -10,7 +10,7 @@ from app.betting.bet_details import enrich_paper_bets
 from app.betting.market_helpers import closing_line_metrics
 from app.betting.paper_bank import get_strategy_bank
 from app.db import SessionLocal, init_db
-from app.models import OddsSnapshot, PaperBet, Result
+from app.models import OddsSnapshot, PaperBet, Result, Runner
 from app.notifier.telegram import send_telegram_message
 
 
@@ -29,6 +29,29 @@ def _get_final_observed_odds(db, bet: PaperBet):
     return latest_snapshot.odds
 
 
+def _is_placeholder_result_set(db, race_id: int) -> bool:
+    result_rows = db.query(Result).filter(
+        Result.race_id == race_id,
+        Result.finish_position.isnot(None),
+    ).all()
+    runner_count = db.query(Runner).filter(Runner.race_id == race_id).count()
+    if runner_count <= 0 or len(result_rows) != runner_count:
+        return False
+
+    ordered = sorted(result_rows, key=lambda item: item.finish_position or 0)
+    if [row.finish_position for row in ordered] != list(range(1, runner_count + 1)):
+        return False
+
+    for index, row in enumerate(ordered, start=1):
+        expected_margin = 0.0 if index == 1 else round((index - 1) * 0.5, 2)
+        if row.starting_price is not None:
+            return False
+        if row.margin != expected_margin:
+            return False
+
+    return True
+
+
 def settle_bets():
     init_db()
     db = SessionLocal()
@@ -37,6 +60,7 @@ def settle_bets():
         bets_settled = 0
         wins = 0
         losses = 0
+        bets_skipped_no_real_result = 0
 
         unsettled_bets = db.query(PaperBet).filter(PaperBet.settled_flag == False).all()
 
@@ -46,7 +70,12 @@ def settle_bets():
                 Result.runner_id == bet.runner_id,
             ).first()
 
-            if not result_row:
+            if not result_row or result_row.finish_position is None:
+                bets_skipped_no_real_result += 1
+                continue
+
+            if _is_placeholder_result_set(db, bet.race_id):
+                bets_skipped_no_real_result += 1
                 continue
 
             if result_row.finish_position == 1:
@@ -73,12 +102,13 @@ def settle_bets():
             bet_detail = enrich_paper_bets(db, [bet])[0]
             strategy_bank = get_strategy_bank(db, bet.decision_version or "unknown")
             message_lines = [
-                "Paper Bet Settled",
+                "BET SETTLED",
                 f"Horse: {bet_detail['horse_name']}",
                 f"Track: {bet_detail['track'] or 'Unknown'}",
                 f"Race Number: {bet_detail['race_number'] or 'Unknown'}",
                 f"Race ID: {bet_detail['race_id']}",
                 f"Result: {bet_detail['result']}",
+                f"Finish Position: {result_row.finish_position}",
                 f"Odds Taken: {bet_detail['odds_taken']:.2f}",
             ]
             if bet_detail["final_observed_odds"] is not None:
@@ -96,10 +126,12 @@ def settle_bets():
                     f"Strategy Bank: ${strategy_bank:.2f}",
                 ]
             )
-            send_telegram_message("\n".join(message_lines))
+            if send_telegram_message("\n".join(message_lines)):
+                bet.settlement_notified_at = datetime.utcnow()
 
         db.commit()
 
+        print(f"BETS SKIPPED DUE TO NO REAL RESULT: {bets_skipped_no_real_result}")
         print(f"BETS SETTLED: {bets_settled}")
         print(f"WINS: {wins}")
         print(f"LOSSES: {losses}")
