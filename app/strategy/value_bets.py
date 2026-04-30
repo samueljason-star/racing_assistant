@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ from app.config import (
 from app.db import SessionLocal, init_db
 from app.models import Feature, HorseHistory, OddsSnapshot, PaperBet, Prediction, Race, Runner
 from app.notifier.telegram import send_telegram_message
+from app.utils.name_matching import horse_names_match, normalize_horse_name
 
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
 MIN_FIELD_SIZE = 6
@@ -71,15 +73,54 @@ def _safe_finish_value(value) -> float | None:
     return float(value)
 
 
+def _stripped_runner_name(horse_name: str) -> str:
+    return re.sub(r"^\d+\s*[\.\-]?\s*", "", (horse_name or "").strip()).strip()
+
+
 def _recent_history_rows(db, horse_name: str):
-    return (
+    stripped_name = _stripped_runner_name(horse_name)
+    exact_aliases = {
+        value
+        for value in {horse_name.strip(), stripped_name}
+        if value
+    }
+
+    exact_rows = (
         db.query(HorseHistory)
-        .filter(HorseHistory.horse_name == horse_name)
+        .filter(HorseHistory.horse_name.in_(sorted(exact_aliases)))
         .filter(HorseHistory.source != "results_pipeline")
-        .order_by(HorseHistory.run_date.desc(), HorseHistory.id.desc())
-        .limit(3)
+        .order_by(HorseHistory.id.desc())
+        .limit(10)
         .all()
     )
+    if exact_rows:
+        return exact_rows[:3]
+
+    first_token = stripped_name.split()[0] if stripped_name else ""
+    if not first_token:
+        return []
+
+    candidate_rows = (
+        db.query(HorseHistory)
+        .filter(HorseHistory.source != "results_pipeline")
+        .filter(HorseHistory.horse_name.ilike(f"%{first_token}%"))
+        .order_by(HorseHistory.id.desc())
+        .limit(50)
+        .all()
+    )
+
+    matched_rows = []
+    seen_ids = set()
+    for row in candidate_rows:
+        if row.id in seen_ids:
+            continue
+        if horse_names_match(row.horse_name, stripped_name):
+            matched_rows.append(row)
+            seen_ids.add(row.id)
+        if len(matched_rows) >= 3:
+            break
+
+    return matched_rows
 
 
 def _build_recent_form(rows):
