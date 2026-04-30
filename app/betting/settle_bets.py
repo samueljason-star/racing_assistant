@@ -52,6 +52,47 @@ def _is_placeholder_result_set(db, race_id: int) -> bool:
     return True
 
 
+def _send_settlement_notification(db, bet: PaperBet) -> bool:
+    result_row = db.query(Result).filter(
+        Result.race_id == bet.race_id,
+        Result.runner_id == bet.runner_id,
+    ).first()
+    if not result_row or result_row.finish_position is None:
+        return False
+
+    bet_detail = enrich_paper_bets(db, [bet])[0]
+    strategy_bank = get_strategy_bank(db, bet.decision_version or "unknown")
+    message_lines = [
+        "BET SETTLED",
+        f"Horse: {bet_detail['horse_name']}",
+        f"Track: {bet_detail['track'] or 'Unknown'}",
+        f"Race Number: {bet_detail['race_number'] or 'Unknown'}",
+        f"Race ID: {bet_detail['race_id']}",
+        f"Result: {bet_detail['result']}",
+        f"Finish Position: {result_row.finish_position}",
+        f"Odds Taken: {bet_detail['odds_taken']:.2f}",
+    ]
+    if bet_detail["final_observed_odds"] is not None:
+        message_lines.append(
+            f"Final Odds: {bet_detail['final_observed_odds']:.2f}"
+        )
+    if bet_detail["clv_percent"] is not None:
+        message_lines.append(
+            f"CLV Percent: {bet_detail['clv_percent']:+.2f}%"
+        )
+    message_lines.extend(
+        [
+            f"Stake: ${bet_detail['stake']:.2f}",
+            f"Profit/Loss: ${bet_detail['profit_loss']:.2f}",
+            f"Strategy Bank: ${strategy_bank:.2f}",
+        ]
+    )
+    if send_telegram_message("\n".join(message_lines)):
+        bet.settlement_notified_at = datetime.utcnow()
+        return True
+    return False
+
+
 def settle_bets():
     init_db()
     db = SessionLocal()
@@ -99,40 +140,23 @@ def settle_bets():
             bet.settled_at = datetime.utcnow()
             bets_settled += 1
 
-            bet_detail = enrich_paper_bets(db, [bet])[0]
-            strategy_bank = get_strategy_bank(db, bet.decision_version or "unknown")
-            message_lines = [
-                "BET SETTLED",
-                f"Horse: {bet_detail['horse_name']}",
-                f"Track: {bet_detail['track'] or 'Unknown'}",
-                f"Race Number: {bet_detail['race_number'] or 'Unknown'}",
-                f"Race ID: {bet_detail['race_id']}",
-                f"Result: {bet_detail['result']}",
-                f"Finish Position: {result_row.finish_position}",
-                f"Odds Taken: {bet_detail['odds_taken']:.2f}",
-            ]
-            if bet_detail["final_observed_odds"] is not None:
-                message_lines.append(
-                    f"Final Odds: {bet_detail['final_observed_odds']:.2f}"
-                )
-            if bet_detail["clv_percent"] is not None:
-                message_lines.append(
-                    f"CLV Percent: {bet_detail['clv_percent']:+.2f}%"
-                )
-            message_lines.extend(
-                [
-                    f"Stake: ${bet_detail['stake']:.2f}",
-                    f"Profit/Loss: ${bet_detail['profit_loss']:.2f}",
-                    f"Strategy Bank: ${strategy_bank:.2f}",
-                ]
-            )
-            if send_telegram_message("\n".join(message_lines)):
-                bet.settlement_notified_at = datetime.utcnow()
-
+        db.commit()
+        unsent_settled_bets = (
+            db.query(PaperBet)
+            .filter(PaperBet.settled_flag == True)
+            .filter(PaperBet.settlement_notified_at.is_(None))
+            .order_by(PaperBet.id.asc())
+            .all()
+        )
+        settlement_notifications_sent = 0
+        for bet in unsent_settled_bets:
+            if _send_settlement_notification(db, bet):
+                settlement_notifications_sent += 1
         db.commit()
 
         print(f"BETS SKIPPED DUE TO NO REAL RESULT: {bets_skipped_no_real_result}")
         print(f"BETS SETTLED: {bets_settled}")
+        print(f"SETTLEMENT NOTIFICATIONS SENT: {settlement_notifications_sent}")
         print(f"WINS: {wins}")
         print(f"LOSSES: {losses}")
     finally:

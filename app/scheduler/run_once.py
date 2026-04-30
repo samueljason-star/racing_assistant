@@ -14,6 +14,7 @@ from app.betting.settle_bets import settle_bets
 from app.pipelines.compute_features import compute_features
 from app.pipelines.update_results import update_results
 from app.predictions.predict import predict_races
+from app.racing_australia.load_horse_history import load_today_horse_history
 from app.strategy.value_bets import create_value_bets
 
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
@@ -41,6 +42,7 @@ def run_pipeline_once() -> None:
         ("save_markets", save_markets),
         ("save_odds", save_odds),
         ("update_results", update_results),
+        ("load_today_horse_history", load_today_horse_history),
         ("compute_features", compute_features),
         ("predict_races", predict_races),
         ("create_value_bets", create_value_bets),

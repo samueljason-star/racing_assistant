@@ -295,6 +295,48 @@ def create_paper_bet(db, race, chosen_runner, stake):
     return paper_bet
 
 
+def _send_proposed_notification(db, bet: PaperBet) -> bool:
+    bet_detail = enrich_paper_bets(db, [bet])[0]
+    strategy_bank = get_strategy_bank(db, bet.decision_version or DECISION_VERSION)
+    message = (
+        "PROPOSED BET\n"
+        f"Horse: {bet_detail['horse_name']}\n"
+        f"Track/Race: {bet_detail['track'] or 'Unknown'} R{bet_detail['race_number'] or '?'}\n"
+        f"Race Time: {bet_detail['jump_time'] or 'Unknown'}\n"
+        f"Race ID: {bet_detail['race_id']}\n"
+        f"Odds Taken: {bet_detail['odds_taken']:.2f}\n"
+        f"Stake: ${bet_detail['stake']:.2f}\n"
+        f"Model Probability: {bet_detail['model_probability']:.4f}\n"
+        f"Adj Market Probability: {bet_detail['market_probability']:.4f}\n"
+        f"Edge: {bet_detail['edge']:.4f}\n"
+        f"Form Score: {(bet_detail['form_score'] or 0.0):.4f}\n"
+        f"Combined Score: {(bet_detail['combined_score'] or 0.0):.4f}\n"
+        f"Recent Form: {bet_detail['qualification_reason'] or 'N/A'}\n"
+        f"Version: {bet.decision_version or DECISION_VERSION}\n"
+        f"Strategy Bank: ${strategy_bank:.2f}"
+    )
+    if send_telegram_message(message):
+        bet.proposed_notified_at = datetime.utcnow()
+        return True
+    return False
+
+
+def _notify_unsent_proposed_bets(db) -> int:
+    unsent_bets = (
+        db.query(PaperBet)
+        .filter(PaperBet.decision_version == DECISION_VERSION)
+        .filter(PaperBet.settled_flag == False)
+        .filter(PaperBet.proposed_notified_at.is_(None))
+        .order_by(PaperBet.id.asc())
+        .all()
+    )
+    sent_count = 0
+    for bet in unsent_bets:
+        if _send_proposed_notification(db, bet):
+            sent_count += 1
+    return sent_count
+
+
 def create_value_bets():
     init_db()
     db = SessionLocal()
@@ -346,32 +388,12 @@ def create_value_bets():
         for chosen in selected_candidates:
             stake = get_strategy_next_stake(db, DECISION_VERSION)
             race = chosen["runner"].race
-            paper_bet = create_paper_bet(db, race, chosen, stake)
+            create_paper_bet(db, race, chosen, stake)
             bets_created += 1
             created_edges.append(chosen["edge"])
 
-            bet_detail = enrich_paper_bets(db, [paper_bet])[0]
-            strategy_bank = get_strategy_bank(db, DECISION_VERSION)
-            message = (
-                "PROPOSED BET\n"
-                f"Horse: {bet_detail['horse_name']}\n"
-                f"Track/Race: {bet_detail['track'] or 'Unknown'} R{bet_detail['race_number'] or '?'}\n"
-                f"Race Time: {bet_detail['jump_time'] or 'Unknown'}\n"
-                f"Race ID: {bet_detail['race_id']}\n"
-                f"Odds Taken: {bet_detail['odds_taken']:.2f}\n"
-                f"Stake: ${bet_detail['stake']:.2f}\n"
-                f"Model Probability: {chosen['model_probability']:.4f}\n"
-                f"Adj Market Probability: {chosen['market_probability']:.4f}\n"
-                f"Edge: {chosen['edge']:.4f}\n"
-                f"Form Score: {chosen['form_score']:.4f}\n"
-                f"Combined Score: {chosen['combined_score']:.4f}\n"
-                f"Recent Form: {chosen['qualification_reason']}\n"
-                f"Version: {DECISION_VERSION}\n"
-                f"Strategy Bank: ${strategy_bank:.2f}"
-            )
-            if send_telegram_message(message):
-                paper_bet.proposed_notified_at = datetime.utcnow()
-
+        db.commit()
+        proposed_notifications_sent = _notify_unsent_proposed_bets(db)
         db.commit()
 
         avg_edge = sum(created_edges) / len(created_edges) if created_edges else 0.0
@@ -385,6 +407,7 @@ def create_value_bets():
         print(f"RACES CHECKED: {races_checked}")
         print(f"CANDIDATES FOUND: {candidates_found}")
         print(f"PAPER BETS CREATED: {bets_created}")
+        print(f"PROPOSED BET NOTIFICATIONS SENT: {proposed_notifications_sent}")
         print(f"AVG EDGE OF CREATED BETS: {avg_edge:.4f}")
         print("TOP 20 CANDIDATES BY COMBINED SCORE")
         for candidate in top_candidates:
