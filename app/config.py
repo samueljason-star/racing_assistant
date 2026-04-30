@@ -18,6 +18,7 @@ BETFAIR_PASSWORD = os.getenv("BETFAIR_PASSWORD")
 BETFAIR_CERT_FILE = os.getenv("BETFAIR_CERT_FILE")
 BETFAIR_KEY_FILE = os.getenv("BETFAIR_KEY_FILE")
 BETFAIR_REGION = os.getenv("BETFAIR_REGION", "AU").upper()
+PUNTING_FORM_API_KEY = os.getenv("PUNTING_FORM_API_KEY")
 BETFAIR_IDENTITY_BASE_URL = os.getenv(
     "BETFAIR_IDENTITY_BASE_URL",
     "https://identitysso-cert.betfair.com.au"
