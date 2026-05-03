@@ -28,7 +28,7 @@ MAX_MODEL_PROBABILITY = PAPER_MAX_MODEL_PROBABILITY
 COMMISSION_RATE = BETFAIR_COMMISSION_RATE
 DECISION_VERSION = "model_edge_v2"
 MAX_DAILY_BETS = 5
-NO_HISTORY_STRONG_EDGE = 0.07
+MIN_FORM_SCORE = 0.30
 
 
 def race_already_has_bet(db, race_id):
@@ -127,6 +127,7 @@ def _build_recent_form(rows):
     if not rows:
         return {
             "has_history": False,
+            "history_row_count": 0,
             "qualifies": False,
             "qualification_reason": "no_history",
             "form_score": 0.0,
@@ -180,6 +181,7 @@ def _build_recent_form(rows):
 
     return {
         "has_history": True,
+        "history_row_count": len(rows),
         "qualifies": bool(reasons),
         "qualification_reason": ", ".join(reasons) if reasons else "poor_recent_form",
         "form_score": form_score,
@@ -194,17 +196,17 @@ def _build_recent_form(rows):
 def build_runner_signal(db, runner):
     latest_odds = get_latest_odds(db, runner.id)
     if latest_odds is None:
-        return None, "missing_odds"
+        return None, "missing_odds", None
 
     prediction = db.query(Prediction).filter(
         Prediction.race_id == runner.race_id,
         Prediction.runner_id == runner.id,
     ).first()
     if not prediction or prediction.model_probability is None:
-        return None, "missing_prediction"
+        return None, "missing_prediction", None
 
     if prediction.model_probability > MAX_MODEL_PROBABILITY:
-        return None, "model_probability_cap"
+        return None, "model_probability_cap", None
 
     feature = db.query(Feature).filter(
         Feature.race_id == runner.race_id,
@@ -220,25 +222,30 @@ def build_runner_signal(db, runner):
     edge = calculate_edge(model_probability, market_probability)
 
     if market_probability is None or edge is None:
-        return None, "invalid_market_probability"
+        return None, "invalid_market_probability", None
 
     if not (MIN_RUNNER_ODDS <= latest_odds <= MAX_RUNNER_ODDS):
-        return None, "odds_band"
+        return None, "odds_band", None
 
     if edge < MIN_EDGE:
-        return None, "edge_threshold"
+        return None, "edge_threshold", None
 
     recent_form = _build_recent_form(_recent_history_rows(db, runner.horse_name))
-    if not recent_form["has_history"] and edge < NO_HISTORY_STRONG_EDGE:
-        return None, "poor_recent_form"
-    if recent_form["has_history"] and not recent_form["qualifies"]:
-        return None, "poor_recent_form"
+    if not recent_form["has_history"] or recent_form["history_row_count"] < 1:
+        return None, "missing_form_history", {
+            "runner": runner,
+            "latest_odds": latest_odds,
+            "market_probability": market_probability,
+            "model_probability": model_probability,
+            "edge": edge,
+            "reason": "watchlist_no_history",
+        }
+    if not recent_form["qualifies"]:
+        return None, "poor_recent_form", None
+    if recent_form["form_score"] <= 0 or recent_form["form_score"] < MIN_FORM_SCORE:
+        return None, "form_score_too_low", None
 
-    qualification_reason = (
-        "strong_edge_no_history"
-        if not recent_form["has_history"]
-        else recent_form["qualification_reason"]
-    )
+    qualification_reason = recent_form["qualification_reason"]
     form_score = recent_form["form_score"]
     combined_score = round((edge * 0.65) + (form_score * 0.35), 4)
 
@@ -257,7 +264,8 @@ def build_runner_signal(db, runner):
         "last_start_finish": recent_form["last_start_finish"],
         "avg_last3_finish": recent_form["avg_last3_finish"],
         "avg_last3_margin": recent_form["avg_last3_margin"],
-    }, None
+        "history_row_count": recent_form["history_row_count"],
+    }, None, None
 
 
 def get_daily_bet_count(db) -> int:
@@ -279,22 +287,26 @@ def get_race_candidates(db, race, counters, all_candidates):
     runners = db.query(Runner).filter(Runner.race_id == race.id).all()
     if len(runners) < MIN_FIELD_SIZE:
         counters["races_skipped_field_size"] += 1
-        return None, []
+        return None, [], []
 
     candidates = []
+    watchlist_candidates = []
     for runner in runners:
-        signal, skip_reason = build_runner_signal(db, runner)
+        signal, skip_reason, extra = build_runner_signal(db, runner)
         if not signal:
             key = f"runners_skipped_{skip_reason}"
             if key in counters:
                 counters[key] += 1
+            if skip_reason == "missing_form_history" and extra:
+                watchlist_candidates.append(extra)
+                counters["runners_watchlist_no_history"] += 1
             continue
 
         all_candidates.append(signal)
         candidates.append(signal)
 
     candidates.sort(key=lambda item: item["combined_score"], reverse=True)
-    return len(runners), candidates
+    return len(runners), candidates, watchlist_candidates
 
 
 def create_paper_bet(db, race, chosen_runner, stake):
@@ -338,6 +350,11 @@ def create_paper_bet(db, race, chosen_runner, stake):
 
 def _send_proposed_notification(db, bet: PaperBet) -> bool:
     bet_detail = enrich_paper_bets(db, [bet])[0]
+    if (
+        (bet_detail["form_score"] or 0.0) <= 0.0
+        or (bet_detail["qualification_reason"] or "").strip().lower() == "strong_edge_no_history"
+    ):
+        return False
     strategy_bank = get_strategy_bank(db, bet.decision_version or DECISION_VERSION)
     message = (
         "PROPOSED BET\n"
@@ -400,11 +417,15 @@ def create_value_bets():
             "runners_skipped_model_probability_cap": 0,
             "runners_skipped_odds_band": 0,
             "runners_skipped_edge_threshold": 0,
+            "runners_skipped_missing_form_history": 0,
+            "runners_skipped_form_score_too_low": 0,
             "runners_skipped_poor_recent_form": 0,
             "runners_skipped_daily_bet_cap": 0,
+            "runners_watchlist_no_history": 0,
         }
         all_candidates = []
         race_best_candidates = []
+        watchlist_candidates = []
 
         for race in races:
             if not _is_upcoming_race(race):
@@ -414,10 +435,12 @@ def create_value_bets():
             if race_already_has_bet(db, race.id):
                 continue
 
-            field_size, candidates = get_race_candidates(db, race, counters, all_candidates)
+            field_size, candidates, race_watchlist = get_race_candidates(db, race, counters, all_candidates)
             if field_size is None or not candidates:
+                watchlist_candidates.extend(race_watchlist)
                 continue
 
+            watchlist_candidates.extend(race_watchlist)
             best_candidate = candidates[0]
             race_best_candidates.append(best_candidate)
             candidates_found += 1
@@ -463,12 +486,27 @@ def create_value_bets():
                 f"combined_score={candidate['combined_score']:.4f} | "
                 f"reason={candidate['qualification_reason']}"
             )
+        if watchlist_candidates:
+            print("WATCHLIST ONLY - NO HISTORY")
+            for candidate in sorted(watchlist_candidates, key=lambda item: item["edge"], reverse=True)[:20]:
+                print(
+                    f"race_id={candidate['runner'].race_id} | "
+                    f"horse={candidate['runner'].horse_name} | "
+                    f"odds={candidate['latest_odds']:.2f} | "
+                    f"model_probability={candidate['model_probability']:.4f} | "
+                    f"market_probability_adj={candidate['market_probability']:.4f} | "
+                    f"edge={candidate['edge']:.4f} | "
+                    f"reason={candidate['reason']}"
+                )
         print(f"RUNNERS SKIPPED DUE TO MISSING PREDICTION: {counters['runners_skipped_missing_prediction']}")
         print(f"RUNNERS SKIPPED DUE TO MISSING ODDS: {counters['runners_skipped_missing_odds']}")
         print(f"RUNNERS SKIPPED DUE TO ODDS BAND: {counters['runners_skipped_odds_band']}")
         print(f"RUNNERS SKIPPED DUE TO EDGE THRESHOLD: {counters['runners_skipped_edge_threshold']}")
         print(f"RUNNERS SKIPPED DUE TO MODEL PROBABILITY CAP: {counters['runners_skipped_model_probability_cap']}")
+        print(f"RUNNERS SKIPPED DUE TO MISSING FORM HISTORY: {counters['runners_skipped_missing_form_history']}")
+        print(f"RUNNERS SKIPPED DUE TO FORM SCORE TOO LOW: {counters['runners_skipped_form_score_too_low']}")
         print(f"RUNNERS SKIPPED DUE TO POOR RECENT FORM: {counters['runners_skipped_poor_recent_form']}")
+        print(f"WATCHLIST ONLY - NO HISTORY: {counters['runners_watchlist_no_history']}")
         print(f"RUNNERS SKIPPED DUE TO DAILY BET CAP: {counters['runners_skipped_daily_bet_cap']}")
     finally:
         db.close()
