@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 from itertools import product
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
@@ -112,7 +114,33 @@ def build_candidate_models() -> dict[str, Pipeline]:
     }
 
 
+def _retained_feature_names(model: Pipeline, feature_columns: list[str]) -> list[str]:
+    imputer = model.named_steps.get("imputer")
+    if imputer is None:
+        return feature_columns
+
+    feature_names = list(getattr(imputer, "feature_names_in_", feature_columns))
+
+    if hasattr(imputer, "get_feature_names_out"):
+        try:
+            return list(imputer.get_feature_names_out(feature_names))
+        except Exception:
+            pass
+
+    statistics = getattr(imputer, "statistics_", None)
+    if statistics is None:
+        return feature_names
+
+    retained = [
+        name
+        for name, statistic in zip(feature_names, statistics)
+        if not (isinstance(statistic, (float, np.floating)) and np.isnan(statistic))
+    ]
+    return retained or feature_names
+
+
 def _extract_feature_importance(model: Pipeline, feature_columns: list[str]) -> pd.DataFrame:
+    retained_feature_names = _retained_feature_names(model, feature_columns)
     final_model = model.named_steps["model"]
     if hasattr(final_model, "feature_importances_"):
         values = final_model.feature_importances_
@@ -120,11 +148,26 @@ def _extract_feature_importance(model: Pipeline, feature_columns: list[str]) -> 
         values = final_model.coef_[0]
     elif hasattr(final_model, "calibrated_classifiers_"):
         base = final_model.calibrated_classifiers_[0].estimator
-        values = getattr(base, "coef_", [[0.0] * len(feature_columns)])[0]
+        values = getattr(base, "coef_", [[0.0] * len(retained_feature_names)])[0]
     else:
-        values = [0.0] * len(feature_columns)
+        values = [0.0] * len(retained_feature_names)
+
+    importance_values = list(values)
+    if len(importance_values) != len(retained_feature_names):
+        print(
+            "WARNING: Feature importance length mismatch "
+            f"(feature_names={len(retained_feature_names)} importance_values={len(importance_values)}). "
+            "Trimming to the shared length."
+        )
+        shared_length = min(len(retained_feature_names), len(importance_values))
+        retained_feature_names = retained_feature_names[:shared_length]
+        importance_values = importance_values[:shared_length]
+
+    if not retained_feature_names or not importance_values:
+        return pd.DataFrame(columns=["feature", "importance"])
+
     return pd.DataFrame(
-        {"feature": feature_columns, "importance": values}
+        {"feature": retained_feature_names, "importance": importance_values}
     ).sort_values("importance", ascending=False)
 
 
@@ -292,14 +335,24 @@ def develop_testing_model(matched_path: Path = MATCHED_PATH) -> dict[str, pd.Dat
             selected = selected[selected["selection_rule"] == best_rule]
             backtest_frames.append(selected)
 
-        feature_importance = _extract_feature_importance(model, FEATURE_COLUMNS)
-        feature_importance["model_name"] = model_name
-        feature_frames.append(feature_importance)
+        try:
+            feature_importance = _extract_feature_importance(model, FEATURE_COLUMNS)
+            if feature_importance.empty:
+                print(f"WARNING: No feature importance values available for model '{model_name}'.")
+            else:
+                feature_importance["model_name"] = model_name
+                feature_frames.append(feature_importance)
+        except Exception as exc:
+            print(f"WARNING: Feature importance extraction failed for model '{model_name}': {exc}")
 
     results_frame = pd.DataFrame(model_results).sort_values(
         ["score", "roi", "auc"], ascending=[False, False, False]
     )
-    feature_frame = pd.concat(feature_frames, ignore_index=True)
+    feature_frame = (
+        pd.concat(feature_frames, ignore_index=True)
+        if feature_frames
+        else pd.DataFrame(columns=["feature", "importance", "model_name"])
+    )
     backtest_frame = pd.concat(backtest_frames, ignore_index=True) if backtest_frames else pd.DataFrame()
 
     save_dataframe(results_frame, MODEL_RESULTS_PATH)
@@ -320,7 +373,10 @@ def develop_testing_model(matched_path: Path = MATCHED_PATH) -> dict[str, pd.Dat
     print("Testing Model Results")
     print(results_frame.head(20).to_string(index=False))
     print("Top Feature Importances")
-    print(feature_frame.groupby("feature", as_index=False)["importance"].mean().sort_values("importance", ascending=False).head(20).to_string(index=False))
+    if feature_frame.empty:
+        print("No feature importance output was available for this run.")
+    else:
+        print(feature_frame.groupby("feature", as_index=False)["importance"].mean().sort_values("importance", ascending=False).head(20).to_string(index=False))
 
     return {
         "results": results_frame,
@@ -330,7 +386,15 @@ def develop_testing_model(matched_path: Path = MATCHED_PATH) -> dict[str, pd.Dat
 
 
 def main() -> None:
-    develop_testing_model()
+    parser = argparse.ArgumentParser(description="Run only the testing-model stage of the research pipeline.")
+    parser.add_argument(
+        "--matched-path",
+        type=Path,
+        default=MATCHED_PATH,
+        help="Path to matched_runner_data.csv so the testing model can be rerun without re-importing data.",
+    )
+    args = parser.parse_args()
+    develop_testing_model(args.matched_path)
 
 
 if __name__ == "__main__":
