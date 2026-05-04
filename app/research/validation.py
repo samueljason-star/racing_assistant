@@ -342,41 +342,104 @@ def _result_score(row: pd.Series, tier: dict[str, object]) -> float:
         score -= 0.03
     if row["model_name"] == "logistic":
         score += 0.03
+    if row["mode"] == "morning_model":
+        score += 0.02
     return round(score, 6)
 
 
+def _invalid_recommendation(tier: dict[str, object], reason: str) -> dict[str, object]:
+    return {
+        "tier": tier["name"],
+        "mode": "none",
+        "model_name": "none",
+        "probability_threshold": 0.0,
+        "min_edge": 0.0,
+        "min_form_score": 0.0,
+        "max_odds": float(tier["max_odds_cap"]),
+        "max_bets_per_day": 0,
+        "bets": 0,
+        "wins": 0,
+        "strike_rate": 0.0,
+        "flat_roi": 0.0,
+        "pct_roi": 0.0,
+        "flat_drawdown": 0.0,
+        "pct_drawdown": 0.0,
+        "flat_profit_loss": 0.0,
+        "pct_profit_loss": 0.0,
+        "flat_profit_positive": False,
+        "pct_profit_positive": False,
+        "flat_final_bank": 10000.0,
+        "pct_final_bank": 10000.0,
+        "average_odds": 0.0,
+        "average_edge": 0.0,
+        "average_clv": 0.0,
+        "median_clv": 0.0,
+        "clv_hit_rate": 0.0,
+        "clv_sample_size": 0,
+        "clv_sanity_passed": False,
+        "track_concentration": 0.0,
+        "month_concentration": 0.0,
+        "validation_positive_months": 0,
+        "validation_month_count": 0,
+        "validation_positive_tracks": 0,
+        "validation_track_count": 0,
+        "mode_notes": "No validated strategy met the tier requirements.",
+        "warning_flags": "no_valid_strategy",
+        "warnings": ["no_valid_strategy", reason],
+        "auc": 0.0,
+        "brier_score": 0.0,
+        "tier_score": -999.0,
+        "meets_tier_min_bets": False,
+        "meets_flat_roi_floor": False,
+        "recommendation_valid": False,
+        "recommendation_reason": reason,
+    }
+
+
 def _choose_tier_recommendation(results: pd.DataFrame, tier: dict[str, object]) -> dict[str, object]:
+    viable = results[results["bets"] > 0].copy()
+    if viable.empty:
+        return _invalid_recommendation(tier, "no_positive_bet_config_found")
+
     eligible = results[
         (results["max_odds"] <= float(tier["max_odds_cap"]))
         & (results["flat_roi"] >= MIN_FLAT_ROI)
         & (results["flat_profit_positive"] == True)
         & (results["bets"] >= int(tier["min_bets"]))
         & (results["flat_drawdown"] <= float(tier["max_drawdown"]))
+        & (results["validation_positive_months"] > 0)
+        & (results["validation_positive_tracks"] > 0)
     ].copy()
 
     fallback_used = False
     if eligible.empty:
-        eligible = results[
-            (results["max_odds"] <= float(tier["max_odds_cap"]))
-            & (results["flat_roi"] >= MIN_FLAT_ROI)
-            & (results["flat_profit_positive"] == True)
-            & (results["bets"] >= max(10, int(tier["min_bets"] // 2)))
+        eligible = viable[
+            (viable["mode"] == "morning_model")
+            & (viable["max_odds"] <= float(tier["max_odds_cap"]))
+            & (viable["flat_roi"] >= MIN_FLAT_ROI)
+            & (viable["flat_profit_positive"] == True)
+            & (viable["bets"] >= max(10, int(tier["min_bets"] // 2)))
         ].copy()
         fallback_used = True
 
     if eligible.empty:
-        eligible = results[
-            (results["max_odds"] <= float(tier["max_odds_cap"]))
-            & (results["bets"] > 0)
+        eligible = viable[
+            (viable["max_odds"] <= float(tier["max_odds_cap"]))
+            & (viable["flat_roi"] >= MIN_FLAT_ROI)
+            & (viable["flat_profit_positive"] == True)
+            & (viable["bets"] >= max(5, int(tier["min_bets"] // 3)))
         ].copy()
         fallback_used = True
 
     if eligible.empty:
-        eligible = results[results["bets"] > 0].copy()
+        eligible = viable[
+            (viable["mode"] == "morning_model")
+            & (viable["bets"] > 0)
+        ].copy()
         fallback_used = True
 
     if eligible.empty:
-        eligible = results.copy()
+        eligible = viable.copy()
         fallback_used = True
 
     scored = eligible.copy()
@@ -393,6 +456,8 @@ def _choose_tier_recommendation(results: pd.DataFrame, tier: dict[str, object]) 
     chosen["warnings"] = sorted(set(warnings))
     chosen["meets_tier_min_bets"] = int(chosen.get("bets", 0)) >= int(tier["min_bets"])
     chosen["meets_flat_roi_floor"] = float(chosen.get("flat_roi", 0.0)) >= MIN_FLAT_ROI
+    chosen["recommendation_valid"] = int(chosen.get("bets", 0)) > 0
+    chosen["recommendation_reason"] = "fallback_nonzero_strategy" if fallback_used else "tier_requirements_met"
     return chosen
 
 
@@ -497,12 +562,44 @@ def _strategy_breakdowns(bets: pd.DataFrame, tier_payloads: list[dict[str, objec
 
 
 def _live_candidate_from_recommendations(recommendations: list[dict[str, object]]) -> dict[str, object]:
-    logistic_rows = [row for row in recommendations if row["model_name"] == "logistic"]
-    chosen = logistic_rows[0] if logistic_rows else recommendations[0]
+    valid_rows = [row for row in recommendations if row.get("recommendation_valid") and int(row.get("bets", 0)) > 0]
+    if not valid_rows:
+        return {
+            "decision_version": "model_edge_v3",
+            "disabled": True,
+            "disabled_reason": "no_valid_recommendation",
+            "live_mode": "disabled",
+            "max_bets_per_day": 3,
+            "max_odds": 20.0,
+            "min_edge": 0.0,
+            "min_form_score": 0.3,
+            "stake_pct": 0.005,
+            "require_form_confirmation": True,
+            "require_recent_history": True,
+            "no_history_auto_bets": True,
+            "watchlist_only_above_cap": True,
+            "no_late_features_for_morning_bets": True,
+            "warnings": ["no_valid_recommendation"],
+            "notes": "No validated non-zero strategy was found. model_edge_v3 should remain disabled for live paper selection.",
+        }
+
+    morning_logistic = [
+        row for row in valid_rows
+        if row["mode"] == "morning_model" and row["model_name"] == "logistic"
+    ]
+    morning_any = [row for row in valid_rows if row["mode"] == "morning_model"]
+    logistic_rows = [row for row in valid_rows if row["model_name"] == "logistic"]
+    chosen = (
+        (morning_logistic[0] if morning_logistic else None)
+        or (morning_any[0] if morning_any else None)
+        or (logistic_rows[0] if logistic_rows else None)
+        or valid_rows[0]
+    )
     live_max_odds = 20.0 if float(chosen["max_odds"]) <= 20.0 else 30.0
     mode_name = "morning_model" if chosen["mode"] == "morning_model" else "late_market_model"
     return {
         "decision_version": "model_edge_v3",
+        "disabled": False,
         "source_tier": chosen["tier"],
         "source_model_name": chosen["model_name"],
         "source_mode": chosen["mode"],

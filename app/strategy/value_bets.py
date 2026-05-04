@@ -73,6 +73,10 @@ def _load_strategy_profile() -> dict[str, object]:
         profile["disabled_reason"] = f"invalid_validation_artifact:{MODEL_EDGE_V3_CANDIDATE_PATH}"
         return profile
 
+    if bool(payload.get("disabled")):
+        profile["disabled_reason"] = payload.get("disabled_reason", "validation_disabled")
+        return profile
+
     profile.update(
         {
             "max_runner_odds": min(float(payload.get("max_odds", 20.0)), 30.0),
