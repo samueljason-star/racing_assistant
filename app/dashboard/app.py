@@ -1,5 +1,6 @@
 import sys
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -10,7 +11,8 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.betting.bet_details import enrich_paper_bets
-from app.betting.paper_bank import ACTIVE_DECISION_VERSION, get_all_strategy_bank_summary
+from app.betting.paper_bank import get_all_strategy_bank_summary
+from app.config import ACTIVE_DECISION_VERSION, DASHBOARD_FOCUS_DECISION_VERSION
 from app.db import SessionLocal, init_db
 from app.models import Meeting, PaperBet, Race
 from app.reports.performance import (
@@ -21,6 +23,7 @@ from app.reports.performance import (
 )
 
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
+MODEL_EDGE_V3_CANDIDATE_PATH = ROOT_DIR / "app" / "research" / "artifacts" / "model_edge_v3_candidate.json"
 
 app = Flask(__name__)
 
@@ -163,20 +166,35 @@ HTML_TEMPLATE = """
   <div class="container">
     <div class="hero">
       <h1>Racing Assistant</h1>
-      <p>Version-separated v2 edge betting with commission-adjusted probabilities, CLV tracking, and cleaner strategy analysis.</p>
+      <p>Validation-led paper betting with version-separated banks, CLV tracking, and safer model_edge_v3 monitoring.</p>
     </div>
 
     <div class="stats">
-      <div class="card"><div class="label">Active Strategy Bank</div><div class="value">${{ active_bank }}</div></div>
-      <div class="card"><div class="label">model_edge_v2 Bank</div><div class="value">${{ v2_bank }}</div></div>
-      <div class="card"><div class="label">model_edge_v2 P/L</div><div class="value {% if v2_profit_loss < 0 %}negative{% else %}positive{% endif %}">${{ v2_profit_loss_fmt }}</div></div>
-      <div class="card"><div class="label">model_edge_v2 ROI</div><div class="value">{{ v2_roi }}</div></div>
-      <div class="card"><div class="label">Daily P/L</div><div class="value {% if daily_pl < 0 %}negative{% else %}positive{% endif %}">${{ daily_pl_fmt }}</div></div>
-      <div class="card"><div class="label">Open Bets</div><div class="value">{{ open_bets }}</div></div>
+      <div class="card"><div class="label">{{ focus_version }} Bank</div><div class="value">${{ focus_bank }}</div></div>
+      <div class="card"><div class="label">{{ focus_version }} Daily P/L</div><div class="value {% if daily_pl < 0 %}negative{% else %}positive{% endif %}">${{ daily_pl_fmt }}</div></div>
+      <div class="card"><div class="label">{{ focus_version }} ROI</div><div class="value">{{ focus_roi }}</div></div>
+      <div class="card"><div class="label">{{ focus_version }} Open Bets</div><div class="value">{{ open_bets }}</div></div>
+      <div class="card"><div class="label">{{ focus_version }} Settled Bets</div><div class="value">{{ settled_bets }}</div></div>
+      <div class="card"><div class="label">{{ focus_version }} P/L</div><div class="value {% if focus_profit_loss < 0 %}negative{% else %}positive{% endif %}">${{ focus_profit_loss_fmt }}</div></div>
     </div>
 
+    {% if validation_warnings %}
     <div class="section">
-      <h2>Strategy Banks</h2>
+      <h2>Validation Warnings</h2>
+      <div class="card">
+        <div class="table">
+          {% for warning in validation_warnings %}
+          <div class="row" style="grid-template-columns: 1fr;">
+            <div>{{ warning }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="section">
+      <h2>{{ focus_version }} Bank Summary</h2>
       <div class="card">
         <div class="table">
           <div class="row header">
@@ -188,7 +206,35 @@ HTML_TEMPLATE = """
             <div class="hide-sm">Open</div>
             <div class="hide-sm">Settled</div>
           </div>
-          {% for item in strategy_summary %}
+          {% for item in focus_summary %}
+          <div class="row">
+            <div>{{ item.decision_version }}</div>
+            <div>${{ "%.2f"|format(item.starting_bank) }}</div>
+            <div>${{ "%.2f"|format(item.current_bank) }}</div>
+            <div class="hide-md">${{ "%.2f"|format(item.profit_loss) }}</div>
+            <div class="hide-sm">{{ "%.2f%%"|format(item.roi * 100) }}</div>
+            <div class="hide-sm">{{ item.open_bets }}</div>
+            <div class="hide-sm">{{ item.settled_bets }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Legacy Strategy Banks</h2>
+      <div class="card">
+        <div class="table">
+          <div class="row header">
+            <div>Version</div>
+            <div>Start</div>
+            <div>Bank</div>
+            <div class="hide-md">P/L</div>
+            <div class="hide-sm">ROI</div>
+            <div class="hide-sm">Open</div>
+            <div class="hide-sm">Settled</div>
+          </div>
+          {% for item in legacy_summary %}
           <div class="row">
             <div>{{ item.decision_version }}</div>
             <div>${{ "%.2f"|format(item.starting_bank) }}</div>
@@ -339,6 +385,16 @@ def _is_same_brisbane_day(value, target_date) -> bool:
     return bool(converted and converted.date() == target_date)
 
 
+def _load_focus_warnings() -> list[str]:
+    if not MODEL_EDGE_V3_CANDIDATE_PATH.exists():
+        return []
+    try:
+        payload = json.loads(MODEL_EDGE_V3_CANDIDATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ["validation_artifact_unreadable"]
+    return [str(item) for item in payload.get("warnings", [])]
+
+
 @app.route("/")
 def index():
     init_db()
@@ -346,13 +402,20 @@ def index():
 
     try:
         all_rows = db.query(PaperBet).order_by(PaperBet.id.desc()).all()
+        focus_version = DASHBOARD_FOCUS_DECISION_VERSION
+        summary_all = get_all_strategy_bank_summary(db)
+        known_versions = {item["decision_version"] for item in summary_all}
+        if focus_version not in known_versions:
+            focus_version = ACTIVE_DECISION_VERSION
+
         active_rows = [
             bet for bet in all_rows
-            if (bet.decision_version or ACTIVE_DECISION_VERSION) == ACTIVE_DECISION_VERSION
+            if (bet.decision_version or ACTIVE_DECISION_VERSION) == focus_version
         ]
         active_bets = enrich_paper_bets(db, active_rows)
         open_bets = [bet for bet in active_bets if not bet["settled_flag"]]
-        strategy_summary = get_all_strategy_bank_summary(db)
+        settled_bets = [bet for bet in active_bets if bet["settled_flag"]]
+        strategy_summary = summary_all
         summary_by_version = {
             item["decision_version"]: item
             for item in strategy_summary
@@ -369,22 +432,27 @@ def index():
         version_stats = build_version_breakdown(active_bets)
         odds_bucket_stats = build_odds_bucket_breakdown(active_bets)
         edge_bucket_stats = build_edge_bucket_breakdown(active_bets)
-        v2_summary = summary_by_version.get(ACTIVE_DECISION_VERSION, {})
+        focus_summary_row = summary_by_version.get(focus_version, {})
+        focus_summary = [item for item in strategy_summary if item["decision_version"] == focus_version]
+        legacy_summary = [item for item in strategy_summary if item["decision_version"] != focus_version]
 
         return render_template_string(
             HTML_TEMPLATE,
-            active_bank=f"{v2_summary.get('current_bank', 0.0):.2f}",
-            v2_bank=f"{v2_summary.get('current_bank', 0.0):.2f}",
-            v2_profit_loss=v2_summary.get("profit_loss", 0.0),
-            v2_profit_loss_fmt=f"{v2_summary.get('profit_loss', 0.0):.2f}",
-            v2_roi=f"{v2_summary.get('roi', 0.0):.2%}",
+            focus_version=focus_version,
+            focus_bank=f"{focus_summary_row.get('current_bank', 0.0):.2f}",
+            focus_profit_loss=focus_summary_row.get("profit_loss", 0.0),
+            focus_profit_loss_fmt=f"{focus_summary_row.get('profit_loss', 0.0):.2f}",
+            focus_roi=f"{focus_summary_row.get('roi', 0.0):.2%}",
             daily_pl=todays_stats["profit_loss"],
             daily_pl_fmt=f"{todays_stats['profit_loss']:.2f}",
             open_bets=len(open_bets),
-            strategy_summary=strategy_summary,
+            settled_bets=len(settled_bets),
+            focus_summary=focus_summary,
+            legacy_summary=legacy_summary,
             version_stats=version_stats,
             odds_bucket_stats=odds_bucket_stats,
             edge_bucket_stats=edge_bucket_stats,
+            validation_warnings=_load_focus_warnings(),
             recent_bets=active_bets[:20],
         )
     finally:

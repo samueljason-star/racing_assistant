@@ -19,6 +19,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Reset paper betting results safely.\n\n"
             "Examples:\n"
             "  python3 -m app.betting.reset_paper_bank --decision-version model_edge_v2\n"
+            "  python3 -m app.betting.reset_paper_bank --decision-version model_edge_v3\n"
             "  python3 -m app.betting.reset_paper_bank --all\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
@@ -26,7 +27,7 @@ def _build_parser() -> argparse.ArgumentParser:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--decision-version",
-        help="Reset only the selected decision_version, for example model_edge_v2.",
+        help="Reset only the selected decision_version, for example model_edge_v2 or model_edge_v3.",
     )
     group.add_argument(
         "--all",
@@ -144,6 +145,7 @@ def main() -> None:
         print(
             "Usage examples: "
             "python3 -m app.betting.reset_paper_bank --decision-version model_edge_v2 | "
+            "python3 -m app.betting.reset_paper_bank --decision-version model_edge_v3 | "
             "python3 -m app.betting.reset_paper_bank --all"
         )
     finally:

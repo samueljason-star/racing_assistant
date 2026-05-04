@@ -46,6 +46,7 @@ def _get_float_env(name: str, default: float) -> float:
 
 BETFAIR_COMMISSION_RATE = _get_float_env("BETFAIR_COMMISSION_RATE", 0.08)
 PAPER_STAKE_PCT = _get_float_env("PAPER_STAKE_PCT", 0.01)
+MODEL_EDGE_V3_STAKE_PCT = _get_float_env("MODEL_EDGE_V3_STAKE_PCT", 0.005)
 PAPER_STARTING_BANK = _get_float_env(
     "PAPER_STARTING_BANK",
     _get_float_env("PAPER_BANK_BASELINE", 10000.0),
@@ -56,3 +57,4 @@ PAPER_MAX_ODDS = _get_float_env("PAPER_MAX_ODDS", 15.0)
 PAPER_MIN_EDGE = _get_float_env("PAPER_MIN_EDGE", 0.035)
 PAPER_MAX_MODEL_PROBABILITY = _get_float_env("PAPER_MAX_MODEL_PROBABILITY", 0.30)
 ACTIVE_DECISION_VERSION = os.getenv("ACTIVE_DECISION_VERSION", "model_edge_v2")
+DASHBOARD_FOCUS_DECISION_VERSION = os.getenv("DASHBOARD_FOCUS_DECISION_VERSION", "model_edge_v3")

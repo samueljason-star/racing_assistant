@@ -43,7 +43,9 @@ def _build_completion_message(matched_frame: pd.DataFrame) -> str:
     strategy_payload = _artifact_json(RESEARCH_ARTIFACTS_DIR / "best_strategy_config.json")
     form_payload = _artifact_json(RESEARCH_ARTIFACTS_DIR / "best_form_score_config.json")
     safe_strategy = strategy_payload.get("recommended_safe_strategy", {})
+    balanced_strategy = strategy_payload.get("recommended_balanced_strategy", {})
     aggressive_strategy = strategy_payload.get("recommended_aggressive_strategy", {})
+    live_candidate = strategy_payload.get("model_edge_v3_candidate", {})
 
     lines = [
         "RESEARCH COMPLETE",
@@ -61,10 +63,12 @@ def _build_completion_message(matched_frame: pd.DataFrame) -> str:
     if safe_strategy:
         lines.append(
             "Safe strategy: "
-            f"roi={safe_strategy.get('validation_roi')} "
-            f"drawdown={safe_strategy.get('validation_drawdown')} "
-            f"bets={safe_strategy.get('validation_bets')} "
-            f"odds={safe_strategy.get('min_odds')}-{safe_strategy.get('max_odds')} "
+            f"flat_roi={safe_strategy.get('flat_roi')} "
+            f"drawdown={safe_strategy.get('flat_drawdown')} "
+            f"bets={safe_strategy.get('bets')} "
+            f"max_odds={safe_strategy.get('max_odds')} "
+            f"model={safe_strategy.get('model_name')} "
+            f"mode={safe_strategy.get('mode')} "
             f"edge>={safe_strategy.get('min_edge')} "
             f"form>={safe_strategy.get('min_form_score')}"
         )
@@ -72,12 +76,32 @@ def _build_completion_message(matched_frame: pd.DataFrame) -> str:
     if aggressive_strategy:
         lines.append(
             "Aggressive strategy: "
-            f"roi={aggressive_strategy.get('validation_roi')} "
-            f"drawdown={aggressive_strategy.get('validation_drawdown')} "
-            f"bets={aggressive_strategy.get('validation_bets')} "
-            f"odds={aggressive_strategy.get('min_odds')}-{aggressive_strategy.get('max_odds')} "
+            f"flat_roi={aggressive_strategy.get('flat_roi')} "
+            f"drawdown={aggressive_strategy.get('flat_drawdown')} "
+            f"bets={aggressive_strategy.get('bets')} "
+            f"max_odds={aggressive_strategy.get('max_odds')} "
             f"edge>={aggressive_strategy.get('min_edge')} "
             f"form>={aggressive_strategy.get('min_form_score')}"
+        )
+
+    if balanced_strategy:
+        lines.append(
+            "Balanced strategy: "
+            f"flat_roi={balanced_strategy.get('flat_roi')} "
+            f"drawdown={balanced_strategy.get('flat_drawdown')} "
+            f"bets={balanced_strategy.get('bets')} "
+            f"max_odds={balanced_strategy.get('max_odds')} "
+            f"model={balanced_strategy.get('model_name')} "
+            f"mode={balanced_strategy.get('mode')}"
+        )
+
+    if live_candidate:
+        lines.append(
+            "model_edge_v3 candidate: "
+            f"mode={live_candidate.get('live_mode')} "
+            f"max_odds={live_candidate.get('max_odds')} "
+            f"stake_pct={live_candidate.get('stake_pct')} "
+            f"source_tier={live_candidate.get('source_tier')}"
         )
 
     lines.append("No live strategy settings were changed automatically.")

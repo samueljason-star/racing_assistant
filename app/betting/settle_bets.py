@@ -62,8 +62,11 @@ def _send_settlement_notification(db, bet: PaperBet) -> bool:
 
     bet_detail = enrich_paper_bets(db, [bet])[0]
     strategy_bank = get_strategy_bank(db, bet.decision_version or "unknown")
+    header = "BET SETTLED"
+    if (bet.decision_version or "").strip() == "model_edge_v3":
+        header = "BET SETTLED - model_edge_v3"
     message_lines = [
-        "BET SETTLED",
+        header,
         f"Horse: {bet_detail['horse_name']}",
         f"Track: {bet_detail['track'] or 'Unknown'}",
         f"Race Number: {bet_detail['race_number'] or 'Unknown'}",
@@ -80,11 +83,11 @@ def _send_settlement_notification(db, bet: PaperBet) -> bool:
         message_lines.append(
             f"CLV Percent: {bet_detail['clv_percent']:+.2f}%"
         )
-    message_lines.extend(
+        message_lines.extend(
         [
             f"Stake: ${bet_detail['stake']:.2f}",
             f"Profit/Loss: ${bet_detail['profit_loss']:.2f}",
-            f"Strategy Bank: ${strategy_bank:.2f}",
+            f"Updated {bet.decision_version or 'strategy'} Bank: ${strategy_bank:.2f}",
         ]
     )
     if send_telegram_message("\n".join(message_lines)):

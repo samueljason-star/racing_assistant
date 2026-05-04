@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from app.config import ACTIVE_DECISION_VERSION, PAPER_STARTING_BANK, PAPER_STAKE_PCT
+from app.config import ACTIVE_DECISION_VERSION, MODEL_EDGE_V3_STAKE_PCT, PAPER_STARTING_BANK, PAPER_STAKE_PCT
 from app.models import PaperBet, PaperBetArchive, PaperBankReset
 
 STARTING_BANK = PAPER_STARTING_BANK
 STAKE_PERCENT = PAPER_STAKE_PCT
-KNOWN_DECISION_VERSIONS = ("value_v1", "model_edge_v1", "model_edge_v2")
+KNOWN_DECISION_VERSIONS = ("value_v1", "model_edge_v1", "model_edge_v2", "model_edge_v3")
+DECISION_VERSION_STAKE_PCTS = {
+    "model_edge_v3": MODEL_EDGE_V3_STAKE_PCT,
+}
 
 
 def get_known_decision_versions(db) -> list[str]:
@@ -77,7 +80,8 @@ def get_strategy_roi(db, decision_version: str) -> float:
 
 
 def get_strategy_next_stake(db, decision_version: str) -> float:
-    return round(get_strategy_bank(db, decision_version) * STAKE_PERCENT, 2)
+    stake_pct = DECISION_VERSION_STAKE_PCTS.get(decision_version, STAKE_PERCENT)
+    return round(get_strategy_bank(db, decision_version) * stake_pct, 2)
 
 
 def get_all_strategy_bank_summary(db) -> list[dict[str, float | int | str]]:
