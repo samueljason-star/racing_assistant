@@ -1,14 +1,29 @@
 from __future__ import annotations
 
-from app.config import ACTIVE_DECISION_VERSION, MODEL_EDGE_LATE_V1_STAKE_PCT, MODEL_EDGE_V3_STAKE_PCT, PAPER_STARTING_BANK, PAPER_STAKE_PCT
+from app.config import (
+    ACTIVE_DECISION_VERSION,
+    MODEL_EDGE_LATE_V1_STAKE_PCT,
+    MODEL_EDGE_LATE_V2_STAKE_PCT,
+    MODEL_EDGE_V3_STAKE_PCT,
+    PAPER_STARTING_BANK,
+    PAPER_STAKE_PCT,
+)
 from app.models import PaperBet, PaperBetArchive, PaperBankReset
 
 STARTING_BANK = PAPER_STARTING_BANK
 STAKE_PERCENT = PAPER_STAKE_PCT
-KNOWN_DECISION_VERSIONS = ("value_v1", "model_edge_v1", "model_edge_v2", "model_edge_v3", "model_edge_late_v1")
+KNOWN_DECISION_VERSIONS = (
+    "value_v1",
+    "model_edge_v1",
+    "model_edge_v2",
+    "model_edge_v3",
+    "model_edge_late_v1",
+    "model_edge_late_v2",
+)
 DECISION_VERSION_STAKE_PCTS = {
     "model_edge_v3": MODEL_EDGE_V3_STAKE_PCT,
     "model_edge_late_v1": MODEL_EDGE_LATE_V1_STAKE_PCT,
+    "model_edge_late_v2": MODEL_EDGE_LATE_V2_STAKE_PCT,
 }
 
 

@@ -17,6 +17,7 @@ from app.pipelines.update_results import update_results
 from app.predictions.predict import predict_races
 from app.racing_australia.load_horse_history import load_today_horse_history
 from app.strategy.late_market_bets import create_late_market_bets
+from app.strategy.late_market_v2_bets import create_late_market_v2_bets
 from app.strategy.value_bets import create_value_bets
 
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
@@ -64,6 +65,7 @@ def run_fast_pipeline_once() -> None:
         ("predict_races", predict_races),
         ("create_value_bets", create_value_bets),
         ("create_late_market_bets", create_late_market_bets),
+        ("create_late_market_v2_bets", create_late_market_v2_bets),
         ("settle_bets", settle_bets),
     ]
     _run_pipeline("FAST PIPELINE", steps)
