@@ -23,6 +23,7 @@ MINUTES_TO_JUMP_MIN = 6.0
 MINUTES_TO_JUMP_MAX = 12.0
 MAX_DAILY_BETS = 5
 POSITIVE_MOVEMENT_MIN = 0.01
+MAX_REJECTION_LOG_ROWS = 5
 
 
 def _now_utc() -> datetime:
@@ -179,6 +180,52 @@ def _daily_bet_count(db) -> int:
         .filter(PaperBet.placed_at >= start_utc, PaperBet.placed_at < end_utc)
         .count()
     )
+
+
+def _build_rejection_log(
+    db,
+    race,
+    runner: Runner,
+    market_snapshot: dict[str, float | None] | None,
+    market_rank: int | None,
+    skip_reason: str,
+    minutes_to_jump: float | None,
+) -> dict[str, object]:
+    prediction = (
+        db.query(Prediction)
+        .filter(Prediction.race_id == runner.race_id, Prediction.runner_id == runner.id)
+        .first()
+    )
+    latest_odds = None if not market_snapshot else market_snapshot.get("latest_odds")
+    model_probability = prediction.model_probability if prediction and prediction.model_probability is not None else None
+    market_probability = (
+        commission_adjusted_market_probability(latest_odds, COMMISSION_RATE) if latest_odds is not None else None
+    )
+    edge = (
+        calculate_edge(model_probability, market_probability)
+        if model_probability is not None and market_probability is not None
+        else None
+    )
+    has_signal, best_movement = _positive_late_signal(market_snapshot or {})
+    recent_form = _build_recent_form(_recent_history_rows(db, runner.horse_name))
+
+    return {
+        "track": race.track,
+        "race_number": race.race_number,
+        "horse_name": runner.horse_name,
+        "minutes_to_jump": minutes_to_jump,
+        "latest_odds": latest_odds,
+        "form_score": recent_form.get("form_score"),
+        "market_rank": market_rank,
+        "open_to_current_movement": None if not market_snapshot else market_snapshot.get("open_to_current_movement"),
+        "60_to_current_movement": None if not market_snapshot else market_snapshot.get("60_to_current_movement"),
+        "30_to_current_movement": None if not market_snapshot else market_snapshot.get("30_to_current_movement"),
+        "model_probability": model_probability,
+        "edge": edge,
+        "best_movement": best_movement if has_signal or best_movement else 0.0,
+        "skip_reason": skip_reason,
+        "history_row_count": recent_form.get("history_row_count", 0),
+    }
 
 
 def _build_runner_signal(db, race, runner: Runner, market_snapshot: dict[str, float | None], market_rank: int | None):
@@ -363,6 +410,7 @@ def create_late_market_bets():
         }
 
         race_best_candidates = []
+        rejected_logs: list[dict[str, object]] = []
 
         for race in races:
             counters["races_checked"] += 1
@@ -402,6 +450,17 @@ def create_late_market_bets():
                 )
                 if signal is None:
                     counters[f"runners_skipped_{skip_reason}"] += 1
+                    rejected_logs.append(
+                        _build_rejection_log(
+                            db,
+                            race,
+                            runner,
+                            market_snapshot,
+                            market_ranks.get(runner.id),
+                            skip_reason,
+                            minutes,
+                        )
+                    )
                     continue
                 race_candidates.append(signal)
                 counters["candidates_found"] += 1
@@ -443,6 +502,35 @@ def create_late_market_bets():
         print(f"RUNNERS SKIPPED DUE TO NON-POSITIVE EDGE: {counters['runners_skipped_non_positive_edge']}")
         print(f"RUNNERS SKIPPED DUE TO NON-POSITIVE LATE MOVEMENT: {counters['runners_skipped_late_movement_not_positive']}")
         print(f"RUNNERS SKIPPED DUE TO DAILY BET CAP: {counters['runners_skipped_daily_bet_cap']}")
+        if rejected_logs:
+            print("TOP REJECTED LATE RUNNERS")
+            rejected_logs.sort(
+                key=lambda row: (
+                    0 if row["skip_reason"] == "late_movement_not_positive" else 1,
+                    row["minutes_to_jump"] if row["minutes_to_jump"] is not None else 9999.0,
+                    -(row["form_score"] or 0.0),
+                )
+            )
+            for row in rejected_logs[:MAX_REJECTION_LOG_ROWS]:
+                print(
+                    " | ".join(
+                        [
+                            f"horse={row['horse_name']}",
+                            f"race={(row['track'] or 'Unknown')} R{row['race_number'] or '?'}",
+                            f"minutes_to_jump={row['minutes_to_jump']}",
+                            f"odds={row['latest_odds']}",
+                            f"form_score={row['form_score']}",
+                            f"market_rank={row['market_rank']}",
+                            f"open_to_current={row['open_to_current_movement']}",
+                            f"60_to_current={row['60_to_current_movement']}",
+                            f"30_to_current={row['30_to_current_movement']}",
+                            f"edge={row['edge']}",
+                            f"best_movement={row['best_movement']}",
+                            f"history_rows={row['history_row_count']}",
+                            f"reason={row['skip_reason']}",
+                        ]
+                    )
+                )
     finally:
         db.close()
 
