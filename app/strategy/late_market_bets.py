@@ -192,6 +192,7 @@ def _build_rejection_log(
     skip_reason: str,
     minutes_to_jump: float | None,
 ) -> dict[str, object]:
+    meeting = getattr(race, "meeting", None)
     prediction = (
         db.query(Prediction)
         .filter(Prediction.race_id == runner.race_id, Prediction.runner_id == runner.id)
@@ -211,7 +212,7 @@ def _build_rejection_log(
     recent_form = _build_recent_form(_recent_history_rows(db, runner.horse_name))
 
     return {
-        "track": race.track,
+        "track": meeting.track if meeting else None,
         "race_number": race.race_number,
         "horse_name": runner.horse_name,
         "minutes_to_jump": minutes_to_jump,
