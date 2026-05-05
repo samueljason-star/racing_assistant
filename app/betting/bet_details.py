@@ -2,6 +2,18 @@ from app.betting.market_helpers import edge_bucket_label, odds_bucket_label, raw
 from app.models import Meeting, Race, Runner
 
 
+def _parse_decision_details(decision_reason):
+    details = {}
+    if not decision_reason:
+        return details
+    for part in decision_reason.split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        details[key.strip()] = value.strip()
+    return details
+
+
 def get_runner_name_map(db, runner_ids):
     """Return a mapping of runner_id to horse name for the supplied ids."""
     if not runner_ids:
@@ -42,6 +54,7 @@ def enrich_paper_bets(db, bets):
 
     for bet in bets:
         race_context = race_context_map.get(bet.race_id, {})
+        decision_details = _parse_decision_details(bet.decision_reason)
         enriched.append(
             {
                 "id": bet.id,
@@ -67,6 +80,13 @@ def enrich_paper_bets(db, bets):
                 "avg_last3_margin": getattr(bet, "avg_last3_margin", None),
                 "commission_rate": getattr(bet, "commission_rate", None),
                 "decision_reason": bet.decision_reason,
+                "decision_details": decision_details,
+                "movement_score": decision_details.get("movement_score"),
+                "movement_10_to_now": decision_details.get("movement_10_to_now"),
+                "movement_5_to_now": decision_details.get("movement_5_to_now"),
+                "movement_3_to_now": decision_details.get("movement_3_to_now"),
+                "movement_1_to_now": decision_details.get("movement_1_to_now"),
+                "latest_odds_timestamp": decision_details.get("latest_odds_timestamp"),
                 "decision_version": bet.decision_version,
                 "result": bet.result,
                 "profit_loss": bet.profit_loss,

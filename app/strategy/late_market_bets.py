@@ -19,11 +19,10 @@ MAX_MODEL_PROBABILITY = PAPER_MAX_MODEL_PROBABILITY
 MIN_FORM_SCORE = 0.30
 MIN_RUNNER_ODDS = 3.0
 MAX_RUNNER_ODDS = 30.0
-MINUTES_TO_JUMP_MIN = 6.0
-MINUTES_TO_JUMP_MAX = 12.0
-MAX_DAILY_BETS = 5
-POSITIVE_MOVEMENT_MIN = 0.01
-MIN_ALLOWED_BEST_MOVEMENT = -0.02
+MINUTES_TO_JUMP_MIN = 1.0
+MINUTES_TO_JUMP_MAX = 3.0
+MAX_DAILY_BETS = 3
+MIN_EDGE = -0.01
 MAX_REJECTION_LOG_ROWS = 5
 
 
@@ -85,12 +84,24 @@ def _safe_odds(snapshot: OddsSnapshot | None) -> float | None:
     return float(snapshot.odds)
 
 
-def _runner_market_snapshot(db, race, runner: Runner) -> dict[str, float | None] | None:
-    jump_time = _parse_jump_time(race.jump_time)
-    if not jump_time:
+def _safe_timestamp(snapshot: OddsSnapshot | None) -> datetime | None:
+    if not snapshot or snapshot.timestamp is None:
         return None
+    ts = snapshot.timestamp
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
 
-    current_time = _now_utc()
+
+def _format_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(BRISBANE_TZ).strftime("%H:%M:%S")
+
+
+def _runner_market_snapshot(db, runner: Runner) -> dict[str, object] | None:
+    evaluation_time = _now_utc()
+
     snapshots = _get_runner_snapshots(db, runner.id)
     if not snapshots:
         return None
@@ -102,36 +113,42 @@ def _runner_market_snapshot(db, race, runner: Runner) -> dict[str, float | None]
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        if ts <= current_time:
+        if ts <= evaluation_time:
             usable.append(snapshot)
 
     if not usable:
         return None
 
     latest = usable[-1]
-    opening = usable[0]
-    cut_60 = _snapshot_before(usable, jump_time - timedelta(minutes=60))
-    cut_30 = _snapshot_before(usable, jump_time - timedelta(minutes=30))
-    cut_10 = _snapshot_before(usable, jump_time - timedelta(minutes=10))
+    cut_10 = _snapshot_before(usable, evaluation_time - timedelta(minutes=10))
+    cut_5 = _snapshot_before(usable, evaluation_time - timedelta(minutes=5))
+    cut_3 = _snapshot_before(usable, evaluation_time - timedelta(minutes=3))
+    cut_1 = _snapshot_before(usable, evaluation_time - timedelta(minutes=1))
 
     latest_odds = _safe_odds(latest)
     if latest_odds is None:
         return None
 
-    opening_odds = _safe_odds(opening)
-    odds_60 = _safe_odds(cut_60)
-    odds_30 = _safe_odds(cut_30)
     odds_10 = _safe_odds(cut_10)
+    odds_5 = _safe_odds(cut_5)
+    odds_3 = _safe_odds(cut_3)
+    odds_1 = _safe_odds(cut_1)
 
     return {
         "latest_odds": latest_odds,
-        "opening_odds": opening_odds,
-        "odds_60m": odds_60,
-        "odds_30m": odds_30,
+        "latest_odds_timestamp": _safe_timestamp(latest),
         "odds_10m": odds_10,
-        "open_to_current_movement": (opening_odds - latest_odds) if opening_odds is not None else None,
-        "60_to_current_movement": (odds_60 - latest_odds) if odds_60 is not None else None,
-        "30_to_current_movement": (odds_30 - latest_odds) if odds_30 is not None else None,
+        "odds_10m_timestamp": _safe_timestamp(cut_10),
+        "odds_5m": odds_5,
+        "odds_5m_timestamp": _safe_timestamp(cut_5),
+        "odds_3m": odds_3,
+        "odds_3m_timestamp": _safe_timestamp(cut_3),
+        "odds_1m": odds_1,
+        "odds_1m_timestamp": _safe_timestamp(cut_1),
+        "movement_10_to_now": (odds_10 - latest_odds) if odds_10 is not None else None,
+        "movement_5_to_now": (odds_5 - latest_odds) if odds_5 is not None else None,
+        "movement_3_to_now": (odds_3 - latest_odds) if odds_3 is not None else None,
+        "movement_1_to_now": (odds_1 - latest_odds) if odds_1 is not None else None,
     }
 
 
@@ -153,20 +170,71 @@ def _race_market_ranks(snapshot_by_runner: dict[int, dict[str, float | None]]) -
     return rank_map
 
 
-def _positive_late_signal(market_snapshot: dict[str, float | None]) -> tuple[bool, float]:
-    movements = [
-        value
-        for value in (
-            market_snapshot.get("open_to_current_movement"),
-            market_snapshot.get("60_to_current_movement"),
-            market_snapshot.get("30_to_current_movement"),
-        )
-        if value is not None
-    ]
-    if not movements:
-        return False, 0.0
-    best_movement = max(movements)
-    return best_movement >= MIN_ALLOWED_BEST_MOVEMENT, round(best_movement, 4)
+def _movement_metrics(market_snapshot: dict[str, object]) -> dict[str, object]:
+    movements = {
+        "movement_10_to_now": market_snapshot.get("movement_10_to_now"),
+        "movement_5_to_now": market_snapshot.get("movement_5_to_now"),
+        "movement_3_to_now": market_snapshot.get("movement_3_to_now"),
+        "movement_1_to_now": market_snapshot.get("movement_1_to_now"),
+    }
+    available = [value for value in movements.values() if value is not None]
+    if not available:
+        return {
+            "has_required_movement": False,
+            "skip_reason": "missing_late_movement",
+            "movement_score": 0.0,
+            "best_movement": None,
+        }
+
+    recent_1 = movements["movement_1_to_now"]
+    recent_3 = movements["movement_3_to_now"]
+    positive_count = sum(1 for value in available if value > 0)
+    recent_positive_count = sum(
+        1
+        for value in (movements["movement_5_to_now"], recent_3, recent_1)
+        if value is not None and value > 0
+    )
+    recent_drift = (
+        (recent_1 is not None and recent_1 < 0)
+        or (recent_3 is not None and recent_3 < 0 and (recent_1 is None or recent_1 <= 0))
+        or (positive_count == 1 and (movements["movement_10_to_now"] or 0) > 0 and recent_positive_count == 0)
+    )
+
+    weighted_score = 0.0
+    total_weight = 0.0
+    for key, weight in (
+        ("movement_10_to_now", 0.15),
+        ("movement_5_to_now", 0.25),
+        ("movement_3_to_now", 0.30),
+        ("movement_1_to_now", 0.30),
+    ):
+        movement = movements[key]
+        if movement is None:
+            continue
+        total_weight += weight
+        if movement > 0:
+            component = min(movement / 2.0, 1.0)
+        elif movement == 0:
+            component = 0.25
+        else:
+            component = max(0.0, 0.20 + movement)
+        weighted_score += component * weight
+
+    movement_score = weighted_score / total_weight if total_weight else 0.0
+    if positive_count >= 2:
+        movement_score += 0.10
+    if (recent_1 or 0) > 0 and (recent_3 or 0) > 0:
+        movement_score += 0.10
+    if recent_drift:
+        movement_score -= 0.25
+    movement_score = round(max(0.0, min(1.0, movement_score)), 4)
+
+    return {
+        "has_required_movement": not recent_drift,
+        "skip_reason": "recent_drift" if recent_drift else None,
+        "movement_score": movement_score,
+        "best_movement": round(max(available), 4),
+    }
 
 
 def _daily_bet_count(db) -> int:
@@ -208,8 +276,12 @@ def _build_rejection_log(
         if model_probability is not None and market_probability is not None
         else None
     )
-    has_signal, best_movement = _positive_late_signal(market_snapshot or {})
     recent_form = _build_recent_form(_recent_history_rows(db, runner.horse_name))
+    movement_metrics = _movement_metrics(market_snapshot or {})
+    movement_score = movement_metrics["movement_score"]
+    edge_component = max(edge if edge is not None else -0.05, -0.05)
+    form_component = recent_form.get("form_score") or 0.0
+    combined_score = round((movement_score * 0.50) + (edge_component * 0.30) + (form_component * 0.20), 4)
 
     return {
         "track": meeting.track if meeting else None,
@@ -217,20 +289,32 @@ def _build_rejection_log(
         "horse_name": runner.horse_name,
         "minutes_to_jump": minutes_to_jump,
         "latest_odds": latest_odds,
+        "latest_odds_timestamp": None if not market_snapshot else market_snapshot.get("latest_odds_timestamp"),
+        "odds_10m": None if not market_snapshot else market_snapshot.get("odds_10m"),
+        "odds_5m": None if not market_snapshot else market_snapshot.get("odds_5m"),
+        "odds_3m": None if not market_snapshot else market_snapshot.get("odds_3m"),
+        "odds_1m": None if not market_snapshot else market_snapshot.get("odds_1m"),
         "form_score": recent_form.get("form_score"),
         "market_rank": market_rank,
-        "open_to_current_movement": None if not market_snapshot else market_snapshot.get("open_to_current_movement"),
-        "60_to_current_movement": None if not market_snapshot else market_snapshot.get("60_to_current_movement"),
-        "30_to_current_movement": None if not market_snapshot else market_snapshot.get("30_to_current_movement"),
+        "movement_10_to_now": None if not market_snapshot else market_snapshot.get("movement_10_to_now"),
+        "movement_5_to_now": None if not market_snapshot else market_snapshot.get("movement_5_to_now"),
+        "movement_3_to_now": None if not market_snapshot else market_snapshot.get("movement_3_to_now"),
+        "movement_1_to_now": None if not market_snapshot else market_snapshot.get("movement_1_to_now"),
         "model_probability": model_probability,
         "edge": edge,
-        "best_movement": best_movement if has_signal or best_movement else 0.0,
+        "movement_score": movement_score,
+        "best_movement": movement_metrics["best_movement"],
+        "combined_score": combined_score,
         "skip_reason": skip_reason,
         "history_row_count": recent_form.get("history_row_count", 0),
+        "scratching_flag": runner.scratching_flag,
     }
 
 
-def _build_runner_signal(db, race, runner: Runner, market_snapshot: dict[str, float | None], market_rank: int | None):
+def _build_runner_signal(db, race, runner: Runner, market_snapshot: dict[str, object], market_rank: int | None):
+    if runner.scratching_flag:
+        return None, "scratched_runner"
+
     prediction = (
         db.query(Prediction)
         .filter(Prediction.race_id == runner.race_id, Prediction.runner_id == runner.id)
@@ -261,52 +345,49 @@ def _build_runner_signal(db, race, runner: Runner, market_snapshot: dict[str, fl
     edge = calculate_edge(prediction.model_probability, market_probability)
     if edge is None:
         return None, "invalid_market_probability"
-    if edge <= 0:
-        return None, "non_positive_edge"
+    if edge < MIN_EDGE:
+        return None, "edge_too_negative"
 
-    available_movements = [
-        value
-        for value in (
-            market_snapshot.get("open_to_current_movement"),
-            market_snapshot.get("60_to_current_movement"),
-            market_snapshot.get("30_to_current_movement"),
-        )
-        if value is not None
-    ]
-    if not available_movements:
-        return None, "missing_late_movement"
-
-    has_signal, best_movement = _positive_late_signal(market_snapshot)
-    if not has_signal:
-        return None, "late_movement_too_negative"
+    movement_metrics = _movement_metrics(market_snapshot)
+    if not movement_metrics["has_required_movement"]:
+        return None, movement_metrics["skip_reason"]
 
     minutes_to_jump = _minutes_to_jump(race)
-    score = round((edge * 0.55) + (recent_form["form_score"] * 0.25) + (best_movement * 0.20), 4)
+    combined_score = round(
+        (movement_metrics["movement_score"] * 0.50)
+        + (max(edge, -0.05) * 0.30)
+        + (recent_form["form_score"] * 0.20),
+        4,
+    )
 
     return {
         "runner": runner,
         "race": race,
         "latest_odds": latest_odds,
+        "latest_odds_timestamp": market_snapshot.get("latest_odds_timestamp"),
         "market_probability": market_probability,
         "model_probability": prediction.model_probability,
         "edge": edge,
         "form_score": recent_form["form_score"],
         "market_rank": market_rank,
-        "opening_odds": market_snapshot.get("opening_odds"),
-        "odds_60m": market_snapshot.get("odds_60m"),
-        "odds_30m": market_snapshot.get("odds_30m"),
         "odds_10m": market_snapshot.get("odds_10m"),
-        "open_to_current_movement": market_snapshot.get("open_to_current_movement"),
-        "60_to_current_movement": market_snapshot.get("60_to_current_movement"),
-        "30_to_current_movement": market_snapshot.get("30_to_current_movement"),
-        "best_movement": best_movement,
+        "odds_5m": market_snapshot.get("odds_5m"),
+        "odds_3m": market_snapshot.get("odds_3m"),
+        "odds_1m": market_snapshot.get("odds_1m"),
+        "movement_10_to_now": market_snapshot.get("movement_10_to_now"),
+        "movement_5_to_now": market_snapshot.get("movement_5_to_now"),
+        "movement_3_to_now": market_snapshot.get("movement_3_to_now"),
+        "movement_1_to_now": market_snapshot.get("movement_1_to_now"),
+        "movement_score": movement_metrics["movement_score"],
+        "best_movement": movement_metrics["best_movement"],
         "minutes_to_jump": minutes_to_jump,
-        "score": score,
+        "combined_score": combined_score,
         "qualification_reason": recent_form["qualification_reason"],
         "last_start_finish": recent_form["last_start_finish"],
         "avg_last3_finish": recent_form["avg_last3_finish"],
         "avg_last3_margin": recent_form["avg_last3_margin"],
         "history_row_count": recent_form["history_row_count"],
+        "scratching_flag": runner.scratching_flag,
     }, None
 
 
@@ -320,7 +401,7 @@ def _create_paper_bet(db, signal: dict[str, object], stake: float):
         model_probability=signal["model_probability"],
         edge=signal["edge"],
         form_score=signal["form_score"],
-        combined_score=signal["score"],
+        combined_score=signal["combined_score"],
         qualification_reason=f"late_market:{signal['qualification_reason']}",
         last_start_finish=signal["last_start_finish"],
         avg_last3_finish=signal["avg_last3_finish"],
@@ -328,14 +409,18 @@ def _create_paper_bet(db, signal: dict[str, object], stake: float):
         stake=stake,
         commission_rate=COMMISSION_RATE,
         decision_reason=(
-            f"late_market_score={signal['score']:.4f} | edge={signal['edge']:.4f} | "
+            f"movement_score={signal['movement_score']:.4f} | combined_score={signal['combined_score']:.4f} | "
+            f"edge={signal['edge']:.4f} | "
             f"form_score={signal['form_score']:.4f} | market_rank={signal['market_rank']} | "
             f"minutes_to_jump={signal['minutes_to_jump']} | "
-            f"open_to_current={signal['open_to_current_movement']} | "
-            f"60_to_current={signal['60_to_current_movement']} | "
-            f"30_to_current={signal['30_to_current_movement']} | "
-            f"opening_odds={signal['opening_odds']} | odds_60m={signal['odds_60m']} | "
-            f"odds_30m={signal['odds_30m']} | odds_10m={signal['odds_10m']}"
+            f"latest_odds_timestamp={_format_timestamp(signal['latest_odds_timestamp'])} | "
+            f"odds_10m={signal['odds_10m']} | odds_5m={signal['odds_5m']} | "
+            f"odds_3m={signal['odds_3m']} | odds_1m={signal['odds_1m']} | "
+            f"movement_10_to_now={signal['movement_10_to_now']} | "
+            f"movement_5_to_now={signal['movement_5_to_now']} | "
+            f"movement_3_to_now={signal['movement_3_to_now']} | "
+            f"movement_1_to_now={signal['movement_1_to_now']} | "
+            f"scratching_flag={signal['scratching_flag']}"
         ),
         result=None,
         profit_loss=None,
@@ -361,15 +446,19 @@ def _send_proposed_notification(db, bet: PaperBet) -> bool:
         "PROPOSED LATE BET — model_edge_late_v1\n"
         f"Horse: {bet_detail['horse_name']}\n"
         f"Track/Race: {bet_detail['track'] or 'Unknown'} R{bet_detail['race_number'] or '?'}\n"
-        f"Race Time: {bet_detail['jump_time'] or 'Unknown'}\n"
         f"Minutes to Jump: {details.get('minutes_to_jump', 'Unknown')}\n"
-        f"Odds: {bet_detail['odds_taken']:.2f}\n"
+        f"Odds Taken: {bet_detail['odds_taken']:.2f}\n"
         f"Stake: ${bet_detail['stake']:.2f}\n"
+        f"Movement Score: {details.get('movement_score', 'n/a')}\n"
+        f"Move 10m->Now: {details.get('movement_10_to_now', 'n/a')}\n"
+        f"Move 5m->Now: {details.get('movement_5_to_now', 'n/a')}\n"
+        f"Move 3m->Now: {details.get('movement_3_to_now', 'n/a')}\n"
+        f"Move 1m->Now: {details.get('movement_1_to_now', 'n/a')}\n"
+        f"Edge: {bet_detail['edge']:.4f}\n"
         f"Form Score: {(bet_detail['form_score'] or 0.0):.4f}\n"
+        f"Combined Score: {(bet_detail['combined_score'] or 0.0):.4f}\n"
         f"Market Rank: {details.get('market_rank', 'Unknown')}\n"
-        f"Open-to-Current: {details.get('open_to_current', 'n/a')}\n"
-        f"60-to-Current: {details.get('60_to_current', 'n/a')}\n"
-        f"Edge/Score: {bet_detail['edge']:.4f} / {(bet_detail['combined_score'] or 0.0):.4f}\n"
+        f"Scratching Flag: False\n"
         f"Strategy Bank: ${strategy_bank:.2f}"
     )
     if send_telegram_message(message):
@@ -412,15 +501,16 @@ def create_late_market_bets():
             "races_skipped_existing_bet": 0,
             "runners_skipped_missing_prediction": 0,
             "runners_skipped_model_probability_cap": 0,
+            "runners_skipped_scratched_runner": 0,
             "runners_skipped_missing_odds": 0,
             "runners_skipped_odds_band": 0,
             "runners_skipped_missing_form_history": 0,
             "runners_skipped_poor_recent_form": 0,
             "runners_skipped_form_score_too_low": 0,
             "runners_skipped_invalid_market_probability": 0,
-            "runners_skipped_non_positive_edge": 0,
+            "runners_skipped_edge_too_negative": 0,
             "runners_skipped_missing_late_movement": 0,
-            "runners_skipped_late_movement_too_negative": 0,
+            "runners_skipped_recent_drift": 0,
             "runners_skipped_daily_bet_cap": 0,
         }
 
@@ -445,7 +535,7 @@ def create_late_market_bets():
             runners = db.query(Runner).filter(Runner.race_id == race.id).all()
             snapshot_by_runner = {}
             for runner in runners:
-                snapshot = _runner_market_snapshot(db, race, runner)
+                snapshot = _runner_market_snapshot(db, runner)
                 if snapshot is not None:
                     snapshot_by_runner[runner.id] = snapshot
 
@@ -504,25 +594,56 @@ def create_late_market_bets():
         print(f"PAPER BETS CREATED: {counters['bets_created']}")
         print(f"PROPOSED LATE BET NOTIFICATIONS SENT: {notifications_sent}")
         print(f"RACES SKIPPED DUE TO NO JUMP TIME: {counters['races_skipped_no_jump_time']}")
-        print(f"RACES SKIPPED OUTSIDE TIME WINDOW: {counters['races_skipped_not_in_time_window']}")
-        print(f"RACES SKIPPED DUE TO EXISTING LATE BET: {counters['races_skipped_existing_bet']}")
+        print(f"RACES SKIPPED DUE TO NOT IN TIME WINDOW: {counters['races_skipped_not_in_time_window']}")
+        print(f"RACES SKIPPED DUE TO ALREADY BET RACE: {counters['races_skipped_existing_bet']}")
         print(f"RUNNERS SKIPPED DUE TO MISSING PREDICTION: {counters['runners_skipped_missing_prediction']}")
         print(f"RUNNERS SKIPPED DUE TO MODEL PROBABILITY CAP: {counters['runners_skipped_model_probability_cap']}")
+        print(f"RUNNERS SKIPPED DUE TO SCRATCHED RUNNER: {counters['runners_skipped_scratched_runner']}")
         print(f"RUNNERS SKIPPED DUE TO MISSING ODDS: {counters['runners_skipped_missing_odds']}")
         print(f"RUNNERS SKIPPED DUE TO ODDS BAND: {counters['runners_skipped_odds_band']}")
         print(f"RUNNERS SKIPPED DUE TO MISSING FORM HISTORY: {counters['runners_skipped_missing_form_history']}")
         print(f"RUNNERS SKIPPED DUE TO POOR RECENT FORM: {counters['runners_skipped_poor_recent_form']}")
         print(f"RUNNERS SKIPPED DUE TO FORM SCORE TOO LOW: {counters['runners_skipped_form_score_too_low']}")
         print(f"RUNNERS SKIPPED DUE TO INVALID MARKET PROBABILITY: {counters['runners_skipped_invalid_market_probability']}")
-        print(f"RUNNERS SKIPPED DUE TO NON-POSITIVE EDGE: {counters['runners_skipped_non_positive_edge']}")
+        print(f"RUNNERS SKIPPED DUE TO EDGE TOO NEGATIVE: {counters['runners_skipped_edge_too_negative']}")
         print(f"RUNNERS SKIPPED DUE TO MISSING LATE MOVEMENT: {counters['runners_skipped_missing_late_movement']}")
-        print(f"RUNNERS SKIPPED DUE TO LATE MOVEMENT TOO NEGATIVE: {counters['runners_skipped_late_movement_too_negative']}")
+        print(f"RUNNERS SKIPPED DUE TO RECENT DRIFT: {counters['runners_skipped_recent_drift']}")
         print(f"RUNNERS SKIPPED DUE TO DAILY BET CAP: {counters['runners_skipped_daily_bet_cap']}")
+        if race_best_candidates:
+            print("TOP LATE CANDIDATES")
+            for row in race_best_candidates[:MAX_REJECTION_LOG_ROWS]:
+                meeting = getattr(row["race"], "meeting", None)
+                print(
+                    " | ".join(
+                        [
+                            f"horse={row['runner'].horse_name}",
+                            f"race={(meeting.track if meeting else 'Unknown')} R{row['race'].race_number or '?'}",
+                            f"minutes_to_jump={row['minutes_to_jump']}",
+                            f"latest_odds={row['latest_odds']}",
+                            f"latest_odds_timestamp={_format_timestamp(row['latest_odds_timestamp'])}",
+                            f"odds_10m={row['odds_10m']}",
+                            f"odds_5m={row['odds_5m']}",
+                            f"odds_3m={row['odds_3m']}",
+                            f"odds_1m={row['odds_1m']}",
+                            f"movement_10_to_now={row['movement_10_to_now']}",
+                            f"movement_5_to_now={row['movement_5_to_now']}",
+                            f"movement_3_to_now={row['movement_3_to_now']}",
+                            f"movement_1_to_now={row['movement_1_to_now']}",
+                            f"movement_score={row['movement_score']}",
+                            f"edge={row['edge']}",
+                            f"form_score={row['form_score']}",
+                            f"combined_score={row['combined_score']}",
+                            f"market_rank={row['market_rank']}",
+                            f"history_rows={row['history_row_count']}",
+                            f"scratching_flag={row['scratching_flag']}",
+                        ]
+                    )
+                )
         if rejected_logs:
             print("TOP REJECTED LATE RUNNERS")
             rejected_logs.sort(
                 key=lambda row: (
-                    0 if row["skip_reason"] in {"late_movement_too_negative", "missing_late_movement"} else 1,
+                    0 if row["skip_reason"] in {"recent_drift", "missing_late_movement"} else 1,
                     row["minutes_to_jump"] if row["minutes_to_jump"] is not None else 9999.0,
                     -(row["form_score"] or 0.0),
                 )
@@ -534,15 +655,24 @@ def create_late_market_bets():
                             f"horse={row['horse_name']}",
                             f"race={(row['track'] or 'Unknown')} R{row['race_number'] or '?'}",
                             f"minutes_to_jump={row['minutes_to_jump']}",
-                            f"odds={row['latest_odds']}",
+                            f"latest_odds={row['latest_odds']}",
+                            f"latest_odds_timestamp={_format_timestamp(row['latest_odds_timestamp'])}",
+                            f"odds_10m={row['odds_10m']}",
+                            f"odds_5m={row['odds_5m']}",
+                            f"odds_3m={row['odds_3m']}",
+                            f"odds_1m={row['odds_1m']}",
+                            f"movement_10_to_now={row['movement_10_to_now']}",
+                            f"movement_5_to_now={row['movement_5_to_now']}",
+                            f"movement_3_to_now={row['movement_3_to_now']}",
+                            f"movement_1_to_now={row['movement_1_to_now']}",
+                            f"movement_score={row['movement_score']}",
                             f"form_score={row['form_score']}",
                             f"market_rank={row['market_rank']}",
-                            f"open_to_current={row['open_to_current_movement']}",
-                            f"60_to_current={row['60_to_current_movement']}",
-                            f"30_to_current={row['30_to_current_movement']}",
                             f"edge={row['edge']}",
                             f"best_movement={row['best_movement']}",
+                            f"combined_score={row['combined_score']}",
                             f"history_rows={row['history_row_count']}",
+                            f"scratching_flag={row['scratching_flag']}",
                             f"reason={row['skip_reason']}",
                         ]
                     )
