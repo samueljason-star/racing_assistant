@@ -71,6 +71,15 @@ def run_fast_pipeline_once() -> None:
     _run_pipeline("FAST PIPELINE", steps)
 
 
+def run_ultra_fast_late_pipeline_once() -> None:
+    """Run the minimal late-market refresh loop once."""
+    steps = [
+        ("save_odds", save_odds),
+        ("create_late_market_v2_bets", create_late_market_v2_bets),
+    ]
+    _run_pipeline("ULTRA FAST LATE PIPELINE", steps)
+
+
 def run_slow_refresh_once() -> None:
     """Run the slow history/features refresh pipeline once."""
     steps = [
