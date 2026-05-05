@@ -23,6 +23,7 @@ MINUTES_TO_JUMP_MIN = 6.0
 MINUTES_TO_JUMP_MAX = 12.0
 MAX_DAILY_BETS = 5
 POSITIVE_MOVEMENT_MIN = 0.01
+MIN_ALLOWED_BEST_MOVEMENT = -0.02
 MAX_REJECTION_LOG_ROWS = 5
 
 
@@ -165,7 +166,7 @@ def _positive_late_signal(market_snapshot: dict[str, float | None]) -> tuple[boo
     if not movements:
         return False, 0.0
     best_movement = max(movements)
-    return best_movement >= POSITIVE_MOVEMENT_MIN, round(best_movement, 4)
+    return best_movement >= MIN_ALLOWED_BEST_MOVEMENT, round(best_movement, 4)
 
 
 def _daily_bet_count(db) -> int:
@@ -262,9 +263,21 @@ def _build_runner_signal(db, race, runner: Runner, market_snapshot: dict[str, fl
     if edge <= 0:
         return None, "non_positive_edge"
 
+    available_movements = [
+        value
+        for value in (
+            market_snapshot.get("open_to_current_movement"),
+            market_snapshot.get("60_to_current_movement"),
+            market_snapshot.get("30_to_current_movement"),
+        )
+        if value is not None
+    ]
+    if not available_movements:
+        return None, "missing_late_movement"
+
     has_signal, best_movement = _positive_late_signal(market_snapshot)
     if not has_signal:
-        return None, "late_movement_not_positive"
+        return None, "late_movement_too_negative"
 
     minutes_to_jump = _minutes_to_jump(race)
     score = round((edge * 0.55) + (recent_form["form_score"] * 0.25) + (best_movement * 0.20), 4)
@@ -405,7 +418,8 @@ def create_late_market_bets():
             "runners_skipped_form_score_too_low": 0,
             "runners_skipped_invalid_market_probability": 0,
             "runners_skipped_non_positive_edge": 0,
-            "runners_skipped_late_movement_not_positive": 0,
+            "runners_skipped_missing_late_movement": 0,
+            "runners_skipped_late_movement_too_negative": 0,
             "runners_skipped_daily_bet_cap": 0,
         }
 
@@ -500,13 +514,14 @@ def create_late_market_bets():
         print(f"RUNNERS SKIPPED DUE TO FORM SCORE TOO LOW: {counters['runners_skipped_form_score_too_low']}")
         print(f"RUNNERS SKIPPED DUE TO INVALID MARKET PROBABILITY: {counters['runners_skipped_invalid_market_probability']}")
         print(f"RUNNERS SKIPPED DUE TO NON-POSITIVE EDGE: {counters['runners_skipped_non_positive_edge']}")
-        print(f"RUNNERS SKIPPED DUE TO NON-POSITIVE LATE MOVEMENT: {counters['runners_skipped_late_movement_not_positive']}")
+        print(f"RUNNERS SKIPPED DUE TO MISSING LATE MOVEMENT: {counters['runners_skipped_missing_late_movement']}")
+        print(f"RUNNERS SKIPPED DUE TO LATE MOVEMENT TOO NEGATIVE: {counters['runners_skipped_late_movement_too_negative']}")
         print(f"RUNNERS SKIPPED DUE TO DAILY BET CAP: {counters['runners_skipped_daily_bet_cap']}")
         if rejected_logs:
             print("TOP REJECTED LATE RUNNERS")
             rejected_logs.sort(
                 key=lambda row: (
-                    0 if row["skip_reason"] == "late_movement_not_positive" else 1,
+                    0 if row["skip_reason"] in {"late_movement_too_negative", "missing_late_movement"} else 1,
                     row["minutes_to_jump"] if row["minutes_to_jump"] is not None else 9999.0,
                     -(row["form_score"] or 0.0),
                 )
