@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +11,7 @@ from app.research.utils import (
     PUNTING_FORM_INPUT_DIR,
     RAW_PUNTING_FORM_INPUT_DIR,
     RESEARCH_DATA_DIR,
+    ROOT_DIR,
     attach_common_labels,
     average,
     clean_horse_name,
@@ -29,6 +32,8 @@ from app.research.utils import (
 )
 
 OUTPUT_PATH = RESEARCH_DATA_DIR / "punting_form_clean.csv"
+DEFAULT_MONTHLY_EXPORTS_DIR = ROOT_DIR / "data" / "punting_form_monthly_exports"
+FALLBACK_MONTHLY_EXPORTS_DIR = Path("/Users/sam/Downloads")
 
 ALIASES = {
     "race_date": ["race_date", "meeting_date", "date", "meetingdate", "startdate"],
@@ -170,6 +175,174 @@ def _json_record_from_runner(
     }
 
 
+def _parse_export_forms(runner: dict) -> tuple[list[float], list[float]]:
+    forms = runner.get("Forms") or runner.get("forms") or []
+    finishes: list[float] = []
+    margins: list[float] = []
+    for form in forms:
+        if not isinstance(form, dict):
+            continue
+        if bool(form.get("IsBarrierTrial") or form.get("isBarrierTrial")):
+            continue
+        finish = parse_finish_position(form.get("Position") or form.get("position"))
+        margin = parse_margin(form.get("Margin") or form.get("margin"))
+        if finish is not None:
+            finishes.append(float(finish))
+        if margin is not None:
+            margins.append(float(margin))
+        if len(finishes) >= 3 and len(margins) >= 3:
+            break
+    return finishes[:3], margins[:3]
+
+
+def _monthly_export_runner_to_record(
+    *,
+    meeting_date: object,
+    track_name: object,
+    race_number: object,
+    runner: dict,
+    source_file: Path,
+) -> dict[str, object]:
+    forms_finishes, forms_margins = _parse_export_forms(runner)
+    if not forms_finishes:
+        forms_finishes = _parse_last10_finishes(runner.get("Last10"))
+
+    trainer = runner.get("Trainer") if isinstance(runner.get("Trainer"), dict) else {}
+    jockey = runner.get("Jockey") if isinstance(runner.get("Jockey"), dict) else {}
+
+    return {
+        "race_date": parse_date(meeting_date),
+        "track": clean_text(track_name),
+        "race_number": parse_int(race_number),
+        "horse_name": clean_horse_name(runner.get("Name") or runner.get("Runner")),
+        "barrier": parse_int(runner.get("Barrier") or runner.get("OriginalBarrier")),
+        "jockey": clean_text(jockey.get("FullName") if isinstance(jockey, dict) else runner.get("Jockey")),
+        "trainer": clean_text(trainer.get("FullName") if isinstance(trainer, dict) else runner.get("Trainer")),
+        "weight": parse_float(runner.get("Weight") or runner.get("WeightTotal") or runner.get("WeightAllocated")),
+        "distance": None,
+        "class_name": None,
+        "track_condition": None,
+        "finish_position": parse_finish_position(runner.get("Position")),
+        "margin": parse_margin(runner.get("Margin")),
+        "starting_price": parse_price(runner.get("PriceSP")),
+        "prize_money": parse_money(runner.get("PrizeMoney")),
+        "last_start_finish": int(forms_finishes[0]) if forms_finishes else None,
+        "last_3_finishes": "|".join(str(int(value)) for value in forms_finishes[:3]) if forms_finishes else None,
+        "last_3_margins": "|".join(f"{value:.2f}" for value in forms_margins[:3]) if forms_margins else None,
+        "average_last_3_finish": average(forms_finishes[:3]),
+        "average_last_3_margin": average(forms_margins[:3]),
+        "source_file": str(source_file),
+        "source_kind": "punting_form_monthly_export",
+    }
+
+
+def _monthly_export_stem_for_meeting(track_name: object, meeting_date: object) -> str | None:
+    track = clean_text(track_name)
+    race_date = parse_date(meeting_date)
+    if track is None or race_date is None:
+        return None
+    date_prefix = pd.Timestamp(race_date).strftime("%y%m%d")
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", track).strip("_")
+    return f"{date_prefix}_{slug}"
+
+
+def _load_monthly_export_records(monthly_exports_dir: Path) -> tuple[list[dict[str, object]], int]:
+    if not monthly_exports_dir.exists() and FALLBACK_MONTHLY_EXPORTS_DIR.exists():
+        monthly_exports_dir = FALLBACK_MONTHLY_EXPORTS_DIR
+    if not monthly_exports_dir.exists():
+        return [], 0
+
+    zip_candidates = sorted(monthly_exports_dir.glob("*.zip"))
+    latest_by_month: dict[str, Path] = {}
+    for zip_path in zip_candidates:
+        month_key = zip_path.name.split("-", 1)[0].lower()
+        latest_by_month[month_key] = zip_path
+    zip_files = sorted(latest_by_month.values())
+    records: list[dict[str, object]] = []
+    files_loaded = 0
+
+    for index, zip_path in enumerate(zip_files, start=1):
+        print(f"Processing monthly export {index}/{len(zip_files)}: {zip_path.name}")
+        try:
+            archive = zipfile.ZipFile(zip_path)
+        except (OSError, zipfile.BadZipFile):
+            continue
+
+        with archive:
+            meeting_list_name = next((name for name in archive.namelist() if name.endswith("meetingList.json")), None)
+            if meeting_list_name is None:
+                continue
+
+            try:
+                meeting_rows = json.loads(archive.read(meeting_list_name))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(meeting_rows, list):
+                continue
+
+            meeting_lookup: dict[str, dict] = {}
+            for meeting in meeting_rows:
+                if not isinstance(meeting, dict):
+                    continue
+                track = meeting.get("Track") or {}
+                stem = _monthly_export_stem_for_meeting(
+                    track.get("Name") if isinstance(track, dict) else track,
+                    meeting.get("MeetingDate"),
+                )
+                if stem:
+                    meeting_lookup[stem] = meeting
+
+            form_names = sorted(
+                name for name in archive.namelist() if "/Form/" in name and name.endswith(".json")
+            )
+            for form_name in form_names:
+                files_loaded += 1
+                try:
+                    runner_rows = json.loads(archive.read(form_name))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(runner_rows, list) or not runner_rows:
+                    continue
+
+                stem = Path(form_name).stem
+                meeting = meeting_lookup.get(stem)
+                if meeting is None:
+                    continue
+
+                track = meeting.get("Track") or {}
+                track_name = track.get("Name") if isinstance(track, dict) else track
+                meeting_date = meeting.get("MeetingDate")
+                ordered_race_ids = sorted(
+                    {
+                        parse_int(row.get("RaceId"))
+                        for row in runner_rows
+                        if isinstance(row, dict) and parse_int(row.get("RaceId")) is not None
+                    }
+                )
+                race_number_lookup = {
+                    race_id: index
+                    for index, race_id in enumerate(ordered_race_ids, start=1)
+                }
+
+                for runner in runner_rows:
+                    if not isinstance(runner, dict):
+                        continue
+                    race_id = parse_int(runner.get("RaceId"))
+                    race_number = race_number_lookup.get(race_id)
+                    if race_number is None:
+                        continue
+                    records.append(
+                        _monthly_export_runner_to_record(
+                            meeting_date=meeting_date,
+                            track_name=track_name,
+                            race_number=race_number,
+                            runner=runner,
+                            source_file=Path(f"{zip_path.name}:{form_name}"),
+                        )
+                    )
+    return records, files_loaded
+
+
 def _records_from_results_json(path: Path, payload: dict) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     races = payload.get("payLoad") or []
@@ -267,6 +440,7 @@ def import_punting_form(
     input_dir: Path = PUNTING_FORM_INPUT_DIR,
     output_path: Path = OUTPUT_PATH,
     raw_api_input_dir: Path = RAW_PUNTING_FORM_INPUT_DIR,
+    monthly_exports_dir: Path = DEFAULT_MONTHLY_EXPORTS_DIR,
 ) -> pd.DataFrame:
     files = sorted(input_dir.rglob("*.csv"))
     clean_rows: list[dict[str, object]] = []
@@ -282,6 +456,10 @@ def import_punting_form(
     raw_api_rows, raw_api_file_count = _load_raw_api_records(raw_api_input_dir)
     rows_loaded += len(raw_api_rows)
     clean_rows.extend(raw_api_rows)
+
+    monthly_export_rows, monthly_export_file_count = _load_monthly_export_records(monthly_exports_dir)
+    rows_loaded += len(monthly_export_rows)
+    clean_rows.extend(monthly_export_rows)
 
     clean_frame = pd.DataFrame(clean_rows)
     if clean_frame.empty:
@@ -313,7 +491,7 @@ def import_punting_form(
     save_dataframe(clean_frame, output_path)
 
     print("Punting Form Import Summary")
-    print(f"FILES LOADED: {len(files) + raw_api_file_count}")
+    print(f"FILES LOADED: {len(files) + raw_api_file_count + monthly_export_file_count}")
     print(f"ROWS LOADED: {rows_loaded}")
     print(f"ROWS CLEANED: {len(clean_frame)}")
     print(f"MISSING CRITICAL FIELDS: {critical_missing}")

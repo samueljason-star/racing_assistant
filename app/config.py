@@ -31,6 +31,12 @@ BETFAIR_KEEPALIVE_URL = os.getenv(
     if BETFAIR_REGION in {"AU", "NZ"}
     else "https://identitysso.betfair.com/api/keepAlive",
 )
+BETFAIR_INTERACTIVE_LOGIN_URL = os.getenv(
+    "BETFAIR_INTERACTIVE_LOGIN_URL",
+    "https://identitysso.betfair.com.au/api/login"
+    if BETFAIR_REGION in {"AU", "NZ"}
+    else "https://identitysso.betfair.com/api/login",
+)
 
 
 def _get_float_env(name: str, default: float) -> float:

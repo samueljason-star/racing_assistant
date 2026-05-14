@@ -11,6 +11,7 @@ from app.config import (
     BETFAIR_APP_KEY,
     BETFAIR_CERT_FILE,
     BETFAIR_IDENTITY_BASE_URL,
+    BETFAIR_INTERACTIVE_LOGIN_URL,
     BETFAIR_KEEPALIVE_URL,
     BETFAIR_KEY_FILE,
     BETFAIR_PASSWORD,
@@ -92,6 +93,37 @@ def _cert_login() -> str:
     return _set_session_token(data["sessionToken"], "certlogin")
 
 
+def _interactive_login() -> str:
+    if not BETFAIR_APP_KEY:
+        raise ValueError("Missing BETFAIR_APP_KEY in .env.")
+    if not BETFAIR_USERNAME or not BETFAIR_PASSWORD:
+        raise ValueError(
+            "Missing Betfair interactive login configuration. "
+            "Set BETFAIR_USERNAME and BETFAIR_PASSWORD."
+        )
+
+    response = requests.post(
+        BETFAIR_INTERACTIVE_LOGIN_URL,
+        headers={
+            "Accept": "application/json",
+            "X-Application": BETFAIR_APP_KEY,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data=urlencode(
+            {
+                "username": BETFAIR_USERNAME,
+                "password": BETFAIR_PASSWORD,
+            }
+        ),
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if data.get("status") != "SUCCESS" or not data.get("token"):
+        raise RuntimeError(f"Betfair interactive login failed: {data}")
+    return _set_session_token(data["token"], "interactive_login")
+
+
 def keep_alive() -> bool:
     token = _session_token or BETFAIR_SSID
     if not BETFAIR_APP_KEY or not token:
@@ -130,6 +162,9 @@ def get_session_token(force_refresh: bool = False) -> str:
 
     if _has_certificate_config():
         return _cert_login()
+
+    if BETFAIR_USERNAME and BETFAIR_PASSWORD:
+        return _interactive_login()
 
     if BETFAIR_SSID:
         return _set_session_token(BETFAIR_SSID, "env_ssid")
