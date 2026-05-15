@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -33,6 +34,16 @@ warnings.filterwarnings(
     message="An input array is constant; the correlation coefficient is not defined.",
 )
 
+try:
+    from lightgbm import LGBMRanker
+except ImportError:
+    LGBMRanker = None
+
+try:
+    from xgboost import XGBRanker
+except ImportError:
+    XGBRanker = None
+
 MATCHED_PATH = RESEARCH_DATA_DIR / "matched_runner_data.csv"
 
 ALL_RESULTS_PATH = RESEARCH_REPORTS_DIR / "all_strategy_results.csv"
@@ -47,10 +58,21 @@ RANKING_VS_MARKET_PATH = RESEARCH_REPORTS_DIR / "ranking_vs_market.csv"
 RANKING_QUALITY_REPORT_PATH = RESEARCH_REPORTS_DIR / "ranking_quality_report.csv"
 STABLE_RANKING_SEGMENTS_PATH = RESEARCH_REPORTS_DIR / "stable_ranking_segments.csv"
 UNSTABLE_SEGMENTS_PATH = RESEARCH_REPORTS_DIR / "unstable_segments.csv"
+EXECUTION_STRATEGY_RESULTS_PATH = RESEARCH_REPORTS_DIR / "execution_strategy_results.csv"
+RANKING_EXECUTION_TESTS_PATH = RESEARCH_REPORTS_DIR / "ranking_execution_tests.csv"
+MISSING_FEATURE_WARNINGS_PATH = RESEARCH_REPORTS_DIR / "missing_feature_warnings.csv"
+CHECKPOINT_RESULTS_PATH = RESEARCH_REPORTS_DIR / "all_strategy_results.checkpoint.csv"
+CHECKPOINT_STATE_PATH = RESEARCH_ARTIFACTS_DIR / "strategy_weight_optimizer_checkpoint.json"
+LIKELY_DEAD_END_BRANCHES_PATH = RESEARCH_REPORTS_DIR / "likely_dead_end_branches.txt"
+PROMISING_UNPROVEN_BRANCHES_PATH = RESEARCH_REPORTS_DIR / "promising_but_unproven_branches.txt"
+STRONGEST_RESEARCH_DIRECTIONS_PATH = RESEARCH_REPORTS_DIR / "strongest_remaining_research_directions.txt"
 
 BEST_CONSERVATIVE_PATH = RESEARCH_ARTIFACTS_DIR / "best_conservative_strategy.json"
 BEST_BALANCED_PATH = RESEARCH_ARTIFACTS_DIR / "best_balanced_strategy.json"
 BEST_AGGRESSIVE_PATH = RESEARCH_ARTIFACTS_DIR / "best_aggressive_strategy.json"
+BEST_RANKING_MODEL_PATH = RESEARCH_ARTIFACTS_DIR / "best_ranking_model.json"
+BEST_EXECUTION_CANDIDATE_PATH = RESEARCH_ARTIFACTS_DIR / "best_execution_candidate.json"
+BEST_CALIBRATED_MODEL_PATH = RESEARCH_ARTIFACTS_DIR / "best_calibrated_model.json"
 
 FORM_CONFIG_PATH = RESEARCH_ARTIFACTS_DIR / "best_form_score_config.json"
 
@@ -58,6 +80,7 @@ COMMISSION_RATE = 0.08
 MIN_RUNNERS_PER_RACE = 3
 MIN_BETS_FOR_STABILITY = 40
 MIN_SEGMENT_RACES = 25
+RACE_KEYS = ["race_date", "track_norm", "race_number"]
 MODEL_FEATURE_COLUMNS = [
     "form_signal",
     "market_signal",
@@ -68,6 +91,14 @@ MODEL_FEATURE_COLUMNS = [
     "odds_signal",
     "field_size",
 ]
+EXPECTED_OPTIONAL_FEATURES = {
+    "pace_tempo": ["pace_score", "tempo_score", "run_style", "settling_position"],
+    "sectionals": ["sectional_strength", "last_600_rating", "speed_figure"],
+    "race_shape": ["race_shape_score", "pace_pressure", "early_speed_pressure"],
+    "track_bias": ["track_bias", "lane_bias", "inside_bias"],
+    "trainer_jockey_interaction": ["trainer_jockey_combo", "trainer_jockey_win_rate"],
+    "horse_latent_strength": ["horse_rating", "horse_consistency", "horse_volatility"],
+}
 
 GROUP_WEIGHT_FIELDS = [
     "form_weight",
@@ -231,6 +262,56 @@ def _bucket_odds(value: float | None) -> str:
     if value < 16:
         return "value"
     return "long"
+
+
+def _checkpoint_state(results: pd.DataFrame, processed_configs: list[str]) -> dict[str, Any]:
+    return {
+        "processed_config_ids": processed_configs,
+        "result_rows": int(len(results)),
+    }
+
+
+def _load_checkpoint(resume: bool) -> tuple[pd.DataFrame, set[str]]:
+    if not resume or not CHECKPOINT_RESULTS_PATH.exists():
+        return pd.DataFrame(), set()
+    checkpoint_results = pd.read_csv(CHECKPOINT_RESULTS_PATH)
+    processed = set(checkpoint_results["config_id"].astype(str).tolist()) if "config_id" in checkpoint_results.columns else set()
+    return checkpoint_results, processed
+
+
+def _save_checkpoint(results: pd.DataFrame, processed_configs: list[str]) -> None:
+    if results.empty:
+        return
+    save_dataframe(results, CHECKPOINT_RESULTS_PATH)
+    json_dump(_checkpoint_state(results, processed_configs), CHECKPOINT_STATE_PATH)
+
+
+def _safe_text_write(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def collect_missing_feature_warnings(frame: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for family, columns in EXPECTED_OPTIONAL_FEATURES.items():
+        available = [column for column in columns if column in frame.columns]
+        missing = [column for column in columns if column not in frame.columns]
+        rows.append(
+            {
+                "feature_family": family,
+                "available_count": len(available),
+                "missing_count": len(missing),
+                "available_columns": ",".join(available),
+                "missing_columns": ",".join(missing),
+                "warning": "missing_feature_family" if missing else "",
+                "recommendation": (
+                    "Collect these features to improve ranking edge."
+                    if missing
+                    else "Feature family available."
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def load_research_frame(matched_path: Path = MATCHED_PATH) -> pd.DataFrame:
@@ -544,14 +625,19 @@ def calculate_ranking_metrics(frame: pd.DataFrame, rank_column: str) -> dict[str
             "market_avg_finish_top1": 0.0,
             "market_rank_correlation": 0.0,
             "market_ndcg_at_3": 0.0,
+            "map_at_3": 0.0,
+            "market_map_at_3": 0.0,
+            "mrr": 0.0,
+            "market_mrr": 0.0,
             "top1_hit_delta_vs_market": 0.0,
             "top3_hit_delta_vs_market": 0.0,
             "avg_finish_delta_vs_market": 0.0,
             "rank_correlation_delta_vs_market": 0.0,
             "ndcg_delta_vs_market": 0.0,
+            "map_delta_vs_market": 0.0,
+            "mrr_delta_vs_market": 0.0,
         }
 
-    race_keys = ["race_date", "track_norm", "race_number"]
     top1 = valid[valid[rank_column] == 1].copy()
     market_top1 = valid[valid["market_rank_current"] == 1].copy()
     top1_hit_rate = float(top1["won_flag"].mean()) if len(top1) else 0.0
@@ -559,16 +645,19 @@ def calculate_ranking_metrics(frame: pd.DataFrame, rank_column: str) -> dict[str
     avg_finish_top1 = float(top1["finish_position"].mean()) if len(top1) else 0.0
     market_avg_finish = float(market_top1["finish_position"].mean()) if len(market_top1) else 0.0
 
-    race_level = valid.groupby(race_keys, dropna=False)
     top3_hits = []
     market_top3_hits = []
     correlations = []
     market_correlations = []
     ndcgs = []
     market_ndcgs = []
+    average_precisions = []
+    market_average_precisions = []
+    reciprocal_ranks = []
+    market_reciprocal_ranks = []
     evaluated_races = 0
 
-    for _, race in race_level:
+    for _, race in valid.groupby(RACE_KEYS, dropna=False):
         if len(race) < MIN_RUNNERS_PER_RACE:
             continue
         evaluated_races += 1
@@ -582,6 +671,26 @@ def calculate_ranking_metrics(frame: pd.DataFrame, rank_column: str) -> dict[str
             market_correlations.append(float(-market_corr))
         ndcgs.append(_ndcg_for_race(race, rank_column, k=3))
         market_ndcgs.append(_ndcg_for_race(race, "market_rank_current", k=3))
+        ranked = race.sort_values(rank_column)
+        market_ranked = race.sort_values("market_rank_current")
+        ranked_top3 = ranked.head(3)
+        market_top3 = market_ranked.head(3)
+        ap = 0.0
+        market_ap = 0.0
+        if ranked_top3["won_flag"].any():
+            first_winner_rank = ranked_top3.index[ranked_top3["won_flag"] == 1][0]
+            ap = 1.0 / float(ranked_top3.index.get_loc(first_winner_rank) + 1)
+        if market_top3["won_flag"].any():
+            market_winner_rank = market_top3.index[market_top3["won_flag"] == 1][0]
+            market_ap = 1.0 / float(market_top3.index.get_loc(market_winner_rank) + 1)
+        average_precisions.append(ap)
+        market_average_precisions.append(market_ap)
+        if ranked["won_flag"].any():
+            reciprocal_ranks.append(1.0 / float(ranked.index.get_loc(ranked.index[ranked["won_flag"] == 1][0]) + 1))
+        if market_ranked["won_flag"].any():
+            market_reciprocal_ranks.append(
+                1.0 / float(market_ranked.index.get_loc(market_ranked.index[market_ranked["won_flag"] == 1][0]) + 1)
+            )
 
     top3_hit_rate = float(np.mean(top3_hits)) if top3_hits else 0.0
     market_top3_hit_rate = float(np.mean(market_top3_hits)) if market_top3_hits else 0.0
@@ -589,6 +698,10 @@ def calculate_ranking_metrics(frame: pd.DataFrame, rank_column: str) -> dict[str
     market_rank_correlation = float(np.mean(market_correlations)) if market_correlations else 0.0
     ndcg_at_3 = float(np.mean(ndcgs)) if ndcgs else 0.0
     market_ndcg_at_3 = float(np.mean(market_ndcgs)) if market_ndcgs else 0.0
+    map_at_3 = float(np.mean(average_precisions)) if average_precisions else 0.0
+    market_map_at_3 = float(np.mean(market_average_precisions)) if market_average_precisions else 0.0
+    mrr = float(np.mean(reciprocal_ranks)) if reciprocal_ranks else 0.0
+    market_mrr = float(np.mean(market_reciprocal_ranks)) if market_reciprocal_ranks else 0.0
 
     return {
         "evaluated_races": float(evaluated_races),
@@ -602,11 +715,17 @@ def calculate_ranking_metrics(frame: pd.DataFrame, rank_column: str) -> dict[str
         "market_avg_finish_top1": market_avg_finish,
         "market_rank_correlation": market_rank_correlation,
         "market_ndcg_at_3": market_ndcg_at_3,
+        "map_at_3": map_at_3,
+        "market_map_at_3": market_map_at_3,
+        "mrr": mrr,
+        "market_mrr": market_mrr,
         "top1_hit_delta_vs_market": top1_hit_rate - market_top1_hit_rate,
         "top3_hit_delta_vs_market": top3_hit_rate - market_top3_hit_rate,
         "avg_finish_delta_vs_market": market_avg_finish - avg_finish_top1,
         "rank_correlation_delta_vs_market": rank_correlation - market_rank_correlation,
         "ndcg_delta_vs_market": ndcg_at_3 - market_ndcg_at_3,
+        "map_delta_vs_market": map_at_3 - market_map_at_3,
+        "mrr_delta_vs_market": mrr - market_mrr,
     }
 
 
@@ -628,6 +747,198 @@ def _monthly_ranking_stability(frame: pd.DataFrame, rank_column: str) -> dict[st
         "monthly_top1_delta_std": float(monthly["top1_hit_delta_vs_market"].std(ddof=0) or 0.0),
         "monthly_ndcg_delta_std": float(monthly["ndcg_delta_vs_market"].std(ddof=0) or 0.0),
     }
+
+
+def _relevance_target(frame: pd.DataFrame) -> pd.Series:
+    finish = pd.to_numeric(frame["finish_position"], errors="coerce")
+    relevance = np.where(
+        finish == 1,
+        3.0,
+        np.where(finish == 2, 2.0, np.where(finish == 3, 1.0, 0.0)),
+    )
+    return pd.Series(relevance, index=frame.index, dtype=float)
+
+
+def _fit_optional_ranker_frame(
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    *,
+    method_name: str,
+) -> tuple[pd.DataFrame | None, str]:
+    train_sorted = train_frame.sort_values(RACE_KEYS).copy()
+    test_sorted = test_frame.sort_values(RACE_KEYS).copy()
+    group_sizes = train_sorted.groupby(RACE_KEYS, dropna=False).size().astype(int).tolist()
+    if not group_sizes:
+        return None, f"{method_name}: no training races available"
+
+    x_train = train_sorted[MODEL_FEATURE_COLUMNS].copy()
+    x_test = test_sorted[MODEL_FEATURE_COLUMNS].copy()
+    y_rank = _relevance_target(train_sorted)
+
+    if method_name == "lightgbm_ranker":
+        if LGBMRanker is None:
+            return None, "lightgbm_ranker: lightgbm not installed"
+        model = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "ranker",
+                    LGBMRanker(
+                        objective="lambdarank",
+                        n_estimators=120,
+                        learning_rate=0.05,
+                        num_leaves=31,
+                        min_child_samples=20,
+                        random_state=42,
+                    ),
+                ),
+            ]
+        )
+        model.fit(x_train, y_rank, ranker__group=group_sizes)
+        scores = model.predict(x_test)
+    elif method_name == "xgboost_ranker":
+        if XGBRanker is None:
+            return None, "xgboost_ranker: xgboost not installed"
+        model = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "ranker",
+                    XGBRanker(
+                        objective="rank:pairwise",
+                        n_estimators=120,
+                        learning_rate=0.05,
+                        max_depth=5,
+                        subsample=0.9,
+                        colsample_bytree=0.9,
+                        random_state=42,
+                    ),
+                ),
+            ]
+        )
+        model.fit(x_train, y_rank, ranker__group=group_sizes)
+        scores = model.predict(x_test)
+    else:
+        return None, f"{method_name}: unsupported optional ranker"
+
+    output = test_sorted.copy()
+    output[f"{method_name}_score"] = scores
+    output = _assign_rank_from_score(output, f"{method_name}_score", f"{method_name}_rank")
+    return output, ""
+
+
+def _build_pairwise_ranker_frame(train_frame: pd.DataFrame, test_frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[np.ndarray] = []
+    labels: list[int] = []
+    for _, race in train_frame.groupby(RACE_KEYS, dropna=False):
+        race = race.sort_values("finish_position").copy()
+        race = race[race["finish_position"].notna()].head(8)
+        if len(race) < MIN_RUNNERS_PER_RACE:
+            continue
+        winner = race.iloc[0]
+        losers = race.iloc[1:5]
+        for _, loser in losers.iterrows():
+            winner_vec = winner[MODEL_FEATURE_COLUMNS].to_numpy(dtype=float)
+            loser_vec = loser[MODEL_FEATURE_COLUMNS].to_numpy(dtype=float)
+            rows.append(winner_vec - loser_vec)
+            labels.append(1)
+            rows.append(loser_vec - winner_vec)
+            labels.append(0)
+    if not rows or len(set(labels)) < 2:
+        output = test_frame.copy()
+        output["pairwise_logistic_score"] = 0.0
+        output["pairwise_logistic_probability"] = 0.0
+        output["pairwise_logistic_rank"] = output["market_rank_current"]
+        return output
+
+    pairwise_x = pd.DataFrame(np.vstack(rows), columns=MODEL_FEATURE_COLUMNS)
+    pairwise_y = pd.Series(labels)
+    model = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("model", LogisticRegression(max_iter=1000, class_weight="balanced")),
+        ]
+    )
+    model.fit(pairwise_x, pairwise_y)
+    test_scores = model.decision_function(test_frame[MODEL_FEATURE_COLUMNS].copy())
+    output = test_frame.copy()
+    output["pairwise_logistic_score"] = test_scores
+    output = _assign_rank_from_score(
+        output,
+        "pairwise_logistic_score",
+        "pairwise_logistic_rank",
+        "pairwise_logistic_probability",
+    )
+    return output
+
+
+def _build_listwise_relevance_frame(train_frame: pd.DataFrame, test_frame: pd.DataFrame) -> pd.DataFrame:
+    model = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("model", HistGradientBoostingRegressor(max_depth=5, learning_rate=0.05, max_iter=200, random_state=42)),
+        ]
+    )
+    x_train = train_frame[MODEL_FEATURE_COLUMNS].copy()
+    y_train = _relevance_target(train_frame)
+    x_test = test_frame[MODEL_FEATURE_COLUMNS].copy()
+    if y_train.nunique() < 2:
+        output = test_frame.copy()
+        output["listwise_relevance_score"] = 0.0
+        output["listwise_relevance_probability"] = 0.0
+        output["listwise_relevance_rank"] = output["market_rank_current"]
+        return output
+    model.fit(x_train, y_train)
+    scores = model.predict(x_test)
+    output = test_frame.copy()
+    output["listwise_relevance_score"] = scores
+    output = _assign_rank_from_score(
+        output,
+        "listwise_relevance_score",
+        "listwise_relevance_rank",
+        "listwise_relevance_probability",
+    )
+    return output
+
+
+def _build_research_model_frames(
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    combined_config: StrategyConfig,
+) -> tuple[dict[str, tuple[pd.DataFrame, str, str | None]], list[str]]:
+    warnings_list: list[str] = []
+    combined_test = apply_weighted_score(test_frame, combined_config)
+    calibrated_test = _build_calibrated_model_frame(train_frame, test_frame)
+    pairwise_test = _build_pairwise_ranker_frame(train_frame, test_frame)
+    listwise_test = _build_listwise_relevance_frame(train_frame, test_frame)
+
+    market_test = test_frame.copy()
+    market_test["market_baseline_rank"] = market_test["market_rank_current"]
+    form_test = _assign_rank_from_score(test_frame, "form_signal", "form_only_rank")
+    movement_test = _assign_rank_from_score(test_frame, "movement_score", "movement_only_rank")
+
+    method_frames: dict[str, tuple[pd.DataFrame, str, str | None]] = {
+        "market_baseline": (market_test, "market_baseline_rank", "implied_probability"),
+        "form_only": (form_test, "form_only_rank", None),
+        "movement_only": (movement_test, "movement_only_rank", None),
+        "combined_weighted": (combined_test, "strategy_rank", "strategy_probability"),
+        "calibrated_model": (calibrated_test, "calibrated_model_rank", "calibrated_model_probability"),
+        "pairwise_logistic": (pairwise_test, "pairwise_logistic_rank", "pairwise_logistic_probability"),
+        "listwise_relevance": (listwise_test, "listwise_relevance_rank", "listwise_relevance_probability"),
+    }
+
+    for method_name in ["lightgbm_ranker", "xgboost_ranker"]:
+        frame_or_none, warning_message = _fit_optional_ranker_frame(
+            train_frame,
+            test_frame,
+            method_name=method_name,
+        )
+        if frame_or_none is not None:
+            method_frames[method_name] = (frame_or_none, f"{method_name}_rank", None)
+        elif warning_message:
+            warnings_list.append(warning_message)
+    return method_frames, warnings_list
 
 
 def generate_strategy_configs(max_configs: int, seed: int) -> list[StrategyConfig]:
@@ -1209,7 +1520,6 @@ def build_segment_discovery_report(selected_bets: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_ranking_vs_market_report(scored_test: pd.DataFrame) -> pd.DataFrame:
-    race_keys = ["race_date", "track_norm", "race_number"]
     overall = pd.DataFrame(
         [
             {
@@ -1238,6 +1548,199 @@ def build_ranking_vs_market_report(scored_test: pd.DataFrame) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _monthly_execution_metrics(bets: pd.DataFrame) -> tuple[float, float]:
+    if bets.empty:
+        return 0.0, 0.0
+    monthly = (
+        bets.groupby("race_month", dropna=False)
+        .agg(profit_loss=("profit_loss", "sum"), stake=("stake", "sum"))
+        .reset_index()
+    )
+    monthly["roi"] = monthly["profit_loss"] / monthly["stake"].replace({0.0: np.nan})
+    monthly_roi = monthly["roi"].fillna(0.0)
+    return float((monthly_roi > 0).mean()), float(monthly_roi.std(ddof=0)) if len(monthly_roi) else 0.0
+
+
+def _prepare_execution_bets(selection: pd.DataFrame) -> pd.DataFrame:
+    if selection.empty:
+        return selection.copy()
+    working = selection.copy()
+    working["stake"] = 100.0
+    working["profit_loss"] = np.where(
+        working["won_flag"] == 1,
+        (working["current_price"] - 1.0) * (1.0 - COMMISSION_RATE) * working["stake"],
+        -working["stake"],
+    )
+    return working
+
+
+def _top_ranked_per_race(frame: pd.DataFrame, rank_column: str) -> pd.DataFrame:
+    ordered = frame.sort_values([*RACE_KEYS, rank_column, "current_price"], ascending=[True, True, True, True, True])
+    return ordered.groupby(RACE_KEYS, dropna=False).head(1).copy()
+
+
+def _execution_rule_rows(
+    method_frame: pd.DataFrame,
+    *,
+    method_name: str,
+    rank_column: str,
+    probability_column: str | None,
+) -> list[dict[str, Any]]:
+    top_ranked = _top_ranked_per_race(method_frame, rank_column)
+    movement_median = float(method_frame["movement_score"].median()) if method_frame["movement_score"].notna().any() else 0.0
+    form_median = float(method_frame["form_score"].median()) if method_frame["form_score"].notna().any() else 0.0
+    execution_rules = {
+        "A_top_1_model_ranked_per_race": lambda df: pd.Series(True, index=df.index),
+        "B_top_1_model_ranked_if_odds_2_to_8": lambda df: df["current_price"].between(2.0, 8.0, inclusive="both"),
+        "C_top_1_model_ranked_if_odds_3_to_10": lambda df: df["current_price"].between(3.0, 10.0, inclusive="both"),
+        "D_top_1_model_ranked_if_market_rank_1_to_5": lambda df: df["market_rank_current"].between(1, 5, inclusive="both"),
+        "E_top_1_model_ranked_if_model_improves_market_by_2_places": lambda df: (df["market_rank_current"] - df[rank_column]) >= 2,
+        "F_top_1_model_ranked_if_movement_and_form_above_median": lambda df: (
+            (df["movement_score"] >= movement_median) & (df["form_score"] >= form_median)
+        ),
+        "G_top_1_model_ranked_if_calibrated_prob_gt_market_prob_and_odds_3_to_8": lambda df: (
+            (df[probability_column] > df["implied_probability"]) & df["current_price"].between(3.0, 8.0, inclusive="both")
+        )
+        if probability_column and probability_column in df.columns
+        else pd.Series(False, index=df.index),
+        "H_top_1_model_ranked_small_fields_only": lambda df: df["field_size_bucket"] == "small",
+        "I_top_1_model_ranked_medium_fields_only": lambda df: df["field_size_bucket"] == "medium",
+        "J_top_1_model_ranked_large_fields_only": lambda df: df["field_size_bucket"] == "large",
+    }
+
+    rows: list[dict[str, Any]] = []
+    for rule_name, selector in execution_rules.items():
+        selected = top_ranked[selector(top_ranked)].copy()
+        bets = _prepare_execution_bets(selected)
+        summary = summarise_bets(bets)
+        monthly_positive_rate, monthly_roi_std = _monthly_execution_metrics(bets)
+        rows.append(
+            {
+                "method_name": method_name,
+                "execution_rule": rule_name,
+                "bets": int(summary["bets"]),
+                "wins": int(summary["wins"]),
+                "losses": int(summary["bets"]) - int(summary["wins"]),
+                "strike_rate": float(summary["strike_rate"]),
+                "roi": float(summary["roi"]),
+                "profit_loss": float(summary["profit_loss"]),
+                "drawdown": float(summary["max_drawdown"]),
+                "average_odds": float(summary["average_odds"]),
+                "average_model_rank": float(selected[rank_column].mean()) if not selected.empty else 0.0,
+                "average_market_rank": float(selected["market_rank_current"].mean()) if not selected.empty else 0.0,
+                "remove_best_winner_roi": float(summary["remove_best_winner_roi"]),
+                "remove_top2_winners_roi": float(summary["remove_top2_winners_roi"]),
+                "weekly_positive_rate": float(summary["weekly_positive_rate"]),
+                "weekly_roi_std": float(summary["weekly_roi_std"]),
+                "monthly_positive_rate": monthly_positive_rate,
+                "monthly_roi_std": monthly_roi_std,
+                "survives_robustness": bool(
+                    int(summary["bets"]) >= MIN_BETS_FOR_STABILITY
+                    and float(summary["remove_top2_winners_roi"]) > -0.05
+                    and monthly_positive_rate >= 0.45
+                    and float(summary["max_drawdown"]) <= 0.4
+                ),
+            }
+        )
+    return rows
+
+
+def build_execution_test_reports(
+    method_frames: dict[str, tuple[pd.DataFrame, str, str | None]],
+    ranking_vs_market: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rows: list[dict[str, Any]] = []
+    holdout_overall = ranking_vs_market[
+        (ranking_vs_market["validation_label"] == "holdout_test")
+        & (ranking_vs_market["segment_type"] == "overall")
+    ].copy()
+    ranking_lookup = holdout_overall.set_index("method_name") if not holdout_overall.empty else pd.DataFrame()
+
+    for method_name, (method_frame, rank_column, probability_column) in method_frames.items():
+        if method_name == "market_baseline":
+            continue
+        method_rows = _execution_rule_rows(
+            method_frame,
+            method_name=method_name,
+            rank_column=rank_column,
+            probability_column=probability_column,
+        )
+        for row in method_rows:
+            if not ranking_lookup.empty and method_name in ranking_lookup.index:
+                lookup = ranking_lookup.loc[method_name]
+                row["top1_hit_delta_vs_market"] = float(lookup["top1_hit_delta_vs_market"])
+                row["ndcg_delta_vs_market"] = float(lookup["ndcg_delta_vs_market"])
+                row["ranking_gap_penalty"] = max(0.0, -float(lookup["top1_hit_delta_vs_market"])) + max(
+                    0.0, -float(lookup["ndcg_delta_vs_market"])
+                )
+            else:
+                row["top1_hit_delta_vs_market"] = 0.0
+                row["ndcg_delta_vs_market"] = 0.0
+                row["ranking_gap_penalty"] = 0.0
+            row["execution_stability_score"] = (
+                row["roi"] * 0.2
+                + row["strike_rate"] * 0.15
+                + row["weekly_positive_rate"] * 0.15
+                + row["monthly_positive_rate"] * 0.15
+                + row["remove_best_winner_roi"] * 0.15
+                + row["remove_top2_winners_roi"] * 0.1
+                + row["top1_hit_delta_vs_market"] * 0.1
+                + row["ndcg_delta_vs_market"] * 0.1
+                - row["drawdown"] * 0.2
+                - row["ranking_gap_penalty"] * 0.25
+            )
+        rows.extend(method_rows)
+
+    ranking_execution_tests = pd.DataFrame(rows)
+    if ranking_execution_tests.empty:
+        return ranking_execution_tests, ranking_execution_tests
+    execution_strategy_results = ranking_execution_tests.sort_values(
+        ["survives_robustness", "execution_stability_score", "bets", "roi"],
+        ascending=[False, False, False, False],
+    ).reset_index(drop=True)
+    return ranking_execution_tests, execution_strategy_results
+
+
+def _recommendation_texts(
+    ranking_vs_market: pd.DataFrame,
+    execution_strategy_results: pd.DataFrame,
+    missing_feature_warnings: pd.DataFrame,
+    model_warnings: list[str],
+) -> tuple[list[str], list[str], list[str]]:
+    likely_dead_end = ["Likely dead-end branches:"]
+    promising = ["Promising but unproven branches:"]
+    strongest = ["Strongest remaining research directions:"]
+
+    holdout_overall = ranking_vs_market[
+        (ranking_vs_market["validation_label"] == "holdout_test")
+        & (ranking_vs_market["segment_type"] == "overall")
+        & (ranking_vs_market["method_name"] != "market_baseline")
+    ].copy()
+    if not holdout_overall.empty:
+        for row in holdout_overall.sort_values("top1_hit_delta_vs_market").head(3).itertuples(index=False):
+            likely_dead_end.append(
+                f"- {row.method_name}: top1 delta {row.top1_hit_delta_vs_market:.4f}, ndcg delta {row.ndcg_delta_vs_market:.4f}"
+            )
+        for row in holdout_overall.sort_values(
+            ["top1_hit_delta_vs_market", "ndcg_delta_vs_market"], ascending=[False, False]
+        ).head(3).itertuples(index=False):
+            promising.append(
+                f"- {row.method_name}: closest ranking challenger with top1 delta {row.top1_hit_delta_vs_market:.4f} and ndcg delta {row.ndcg_delta_vs_market:.4f}"
+            )
+
+    if not execution_strategy_results.empty:
+        for row in execution_strategy_results.head(3).itertuples(index=False):
+            strongest.append(
+                f"- {row.method_name} / {row.execution_rule}: bets={int(row.bets)} roi={row.roi:.4f} robustness={row.survives_robustness}"
+            )
+    missing_families = missing_feature_warnings[missing_feature_warnings["missing_count"] > 0]["feature_family"].tolist()
+    if missing_families:
+        strongest.append(f"- Highest-value missing feature families: {', '.join(missing_families)}")
+    if model_warnings:
+        promising.append("- Optional external rankers unavailable in this environment: " + "; ".join(sorted(set(model_warnings))))
+    return likely_dead_end, promising, strongest
 
 
 def _evaluate_method_segments(
@@ -1285,49 +1788,24 @@ def build_baseline_ranking_reports(
     combined_config: StrategyConfig,
     walk_forward_folds: list[tuple[str, pd.DataFrame, pd.DataFrame]],
     leave_one_month_folds: list[tuple[str, pd.DataFrame, pd.DataFrame]],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    combined_test = apply_weighted_score(test_frame, combined_config)
-    calibrated_test = _build_calibrated_model_frame(train_frame, test_frame)
-
-    market_test = test_frame.copy()
-    market_test["market_baseline_rank"] = market_test["market_rank_current"]
-    form_test = _assign_rank_from_score(test_frame, "form_signal", "form_only_rank")
-    movement_test = _assign_rank_from_score(test_frame, "movement_score", "movement_only_rank")
-
-    method_frames = {
-        "market_baseline": (market_test, "market_baseline_rank"),
-        "form_only": (form_test, "form_only_rank"),
-        "movement_only": (movement_test, "movement_only_rank"),
-        "combined_weighted": (combined_test, "strategy_rank"),
-        "calibrated_model": (calibrated_test, "calibrated_model_rank"),
-    }
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str], dict[str, tuple[pd.DataFrame, str, str | None]]]:
+    method_frames, model_warnings = _build_research_model_frames(train_frame, test_frame, combined_config)
+    calibrated_test = method_frames["calibrated_model"][0]
 
     ranking_quality_rows: list[pd.DataFrame] = []
-    segment_rows: list[pd.DataFrame] = []
-    for method_name, (method_frame, rank_column) in method_frames.items():
+    for method_name, (method_frame, rank_column, _) in method_frames.items():
         ranking_quality_rows.append(_evaluate_method_segments(method_frame, method_name, rank_column, "holdout_test"))
-        segment_rows.append(_evaluate_method_segments(method_frame, method_name, rank_column, "holdout_test"))
 
     for fold_name, fold_train, fold_test in walk_forward_folds:
-        fold_method_frames = {
-            "market_baseline": (fold_test.assign(market_baseline_rank=fold_test["market_rank_current"]), "market_baseline_rank"),
-            "form_only": (_assign_rank_from_score(fold_test, "form_signal", "form_only_rank"), "form_only_rank"),
-            "movement_only": (_assign_rank_from_score(fold_test, "movement_score", "movement_only_rank"), "movement_only_rank"),
-            "combined_weighted": (apply_weighted_score(fold_test, combined_config), "strategy_rank"),
-            "calibrated_model": (_build_calibrated_model_frame(fold_train, fold_test), "calibrated_model_rank"),
-        }
-        for method_name, (method_frame, rank_column) in fold_method_frames.items():
+        fold_method_frames, fold_warnings = _build_research_model_frames(fold_train, fold_test, combined_config)
+        model_warnings.extend(fold_warnings)
+        for method_name, (method_frame, rank_column, _) in fold_method_frames.items():
             ranking_quality_rows.append(_evaluate_method_segments(method_frame, method_name, rank_column, fold_name))
 
     for fold_name, fold_train, fold_test in leave_one_month_folds:
-        fold_method_frames = {
-            "market_baseline": (fold_test.assign(market_baseline_rank=fold_test["market_rank_current"]), "market_baseline_rank"),
-            "form_only": (_assign_rank_from_score(fold_test, "form_signal", "form_only_rank"), "form_only_rank"),
-            "movement_only": (_assign_rank_from_score(fold_test, "movement_score", "movement_only_rank"), "movement_only_rank"),
-            "combined_weighted": (apply_weighted_score(fold_test, combined_config), "strategy_rank"),
-            "calibrated_model": (_build_calibrated_model_frame(fold_train, fold_test), "calibrated_model_rank"),
-        }
-        for method_name, (method_frame, rank_column) in fold_method_frames.items():
+        fold_method_frames, fold_warnings = _build_research_model_frames(fold_train, fold_test, combined_config)
+        model_warnings.extend(fold_warnings)
+        for method_name, (method_frame, rank_column, _) in fold_method_frames.items():
             ranking_quality_rows.append(_evaluate_method_segments(method_frame, method_name, rank_column, fold_name))
 
     ranking_quality_report = pd.concat(ranking_quality_rows, ignore_index=True)
@@ -1353,6 +1831,12 @@ def build_baseline_ranking_reports(
             "ndcg_at_3",
             "market_ndcg_at_3",
             "ndcg_delta_vs_market",
+            "map_at_3",
+            "market_map_at_3",
+            "map_delta_vs_market",
+            "mrr",
+            "market_mrr",
+            "mrr_delta_vs_market",
         ]
     ].copy()
 
@@ -1384,6 +1868,8 @@ def build_baseline_ranking_reports(
         stable_ranking_segments,
         unstable_segments,
         calibrated_test,
+        sorted(set(model_warnings)),
+        method_frames,
     )
 
 
@@ -1438,17 +1924,25 @@ def choose_profile_strategies(results: pd.DataFrame) -> dict[str, pd.Series]:
     return picks
 
 
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if pd.isna(value):
+        return None
+    return value
+
+
+def _series_json_payload(row: pd.Series) -> dict[str, Any]:
+    return {key: _to_jsonable(value) for key, value in row.to_dict().items()}
+
+
 def _config_json_payload(row: pd.Series) -> dict[str, Any]:
-    def _to_jsonable(value: Any) -> Any:
-        if isinstance(value, (np.integer,)):
-            return int(value)
-        if isinstance(value, (np.floating,)):
-            return float(value)
-        if isinstance(value, (np.bool_,)):
-            return bool(value)
-        if pd.isna(value):
-            return None
-        return value
 
     payload = {field: _to_jsonable(row[field]) for field in CONFIG_FIELD_NAMES if field in row.index}
     payload["summary"] = {
@@ -1480,16 +1974,24 @@ def run_optimizer(
     top_k_robustness: int = 25,
     train_ratio: float = 0.7,
     skip_save: bool = False,
+    resume: bool = False,
+    chunk_size: int = 25,
+    checkpoint_every: int = 25,
+    low_memory_mode: bool = False,
 ) -> dict[str, Any]:
     frame = load_research_frame(matched_path)
+    missing_feature_warnings = collect_missing_feature_warnings(frame)
     train_frame, test_frame = split_train_test(frame, train_ratio=train_ratio)
     walk_forward_folds = build_walk_forward_folds(frame)
     leave_one_month_folds = build_leave_one_month_out_folds(frame)
     configs = generate_strategy_configs(max_configs=max_configs, seed=random_seed)
+    checkpoint_results, processed_config_ids = _load_checkpoint(resume=resume)
 
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = checkpoint_results.to_dict(orient="records") if not checkpoint_results.empty else []
     walk_forward_rows: list[pd.DataFrame] = []
-    for index, config in enumerate(configs, start=1):
+    pending_configs = [config for config in configs if config.config_id not in processed_config_ids]
+
+    for index, config in enumerate(pending_configs, start=1):
         result, fold_rows = evaluate_strategy(
             frame,
             train_frame,
@@ -1499,11 +2001,19 @@ def run_optimizer(
             config,
         )
         results.append(result)
-        if not fold_rows.empty:
+        processed_config_ids.add(config.config_id)
+        if not fold_rows.empty and not low_memory_mode:
             walk_forward_rows.append(fold_rows)
-        if index % 25 == 0 or index == len(configs):
+        should_checkpoint = bool(checkpoint_every) and (
+            index % checkpoint_every == 0 or index == len(pending_configs)
+        )
+        if should_checkpoint and not skip_save:
+            checkpoint_frame = pd.DataFrame(results)
+            _save_checkpoint(checkpoint_frame, sorted(processed_config_ids))
+        if index % max(chunk_size, 1) == 0 or index == len(pending_configs):
             print(
-                f"Evaluated {index}/{len(configs)} configs | "
+                f"Evaluated {index}/{len(pending_configs)} new configs "
+                f"({len(results)}/{len(configs)} total) | "
                 f"current best robustness={max(r['robustness_score'] for r in results):.4f}"
             )
 
@@ -1532,6 +2042,8 @@ def run_optimizer(
         stable_ranking_segments,
         unstable_segments,
         calibrated_test,
+        model_warnings,
+        method_frames,
     ) = build_baseline_ranking_reports(
         frame,
         train_frame,
@@ -1552,24 +2064,53 @@ def run_optimizer(
         ],
         ignore_index=True,
     )
+    optional_probability_methods = []
+    for method_name, (method_frame, _, probability_column) in method_frames.items():
+        if method_name in {"market_baseline", "combined_weighted", "calibrated_model"}:
+            continue
+        if probability_column and probability_column in method_frame.columns:
+            optional_probability_methods.append(
+                build_calibration_report(
+                    method_frame.rename(columns={probability_column: "strategy_probability"}),
+                    method_name,
+                )
+            )
+    if optional_probability_methods:
+        calibration_report = pd.concat([calibration_report, *optional_probability_methods], ignore_index=True)
     factor_importance = build_factor_importance(top_robust if not top_robust.empty else results_frame.head(10))
     segment_discovery = build_segment_discovery_report(balanced_bets)
     robustness_report = build_robustness_report(top_robust, walk_forward_frame)
-    ranking_metrics_report = pd.DataFrame(
-        [
-            {
-                "strategy_label": "combined_weighted",
-                **ranking_metrics(balanced_scored_test),
-                "test_bets": int(profile_picks["balanced"]["test_bets"]),
-                "test_roi": float(profile_picks["balanced"]["test_roi"]),
-            },
-            {
-                "strategy_label": "calibrated_model",
-                **calculate_ranking_metrics(calibrated_test, "calibrated_model_rank"),
-                "test_bets": 0,
-                "test_roi": 0.0,
-            },
-        ]
+    ranking_metrics_report = ranking_vs_market[
+        (ranking_vs_market["validation_label"] == "holdout_test")
+        & (ranking_vs_market["segment_type"] == "overall")
+    ].copy()
+    execution_tests, execution_strategy_results = build_execution_test_reports(method_frames, ranking_vs_market)
+    ranking_method_lookup = (
+        ranking_metrics_report.set_index("method_name").sort_values(
+            ["top1_hit_delta_vs_market", "ndcg_delta_vs_market"],
+            ascending=[False, False],
+        )
+        if not ranking_metrics_report.empty
+        else pd.DataFrame()
+    )
+    best_ranking_method = (
+        ranking_method_lookup.head(1).reset_index().iloc[0]
+        if not ranking_method_lookup.empty
+        else pd.Series(dtype=object)
+    )
+    best_calibrated_method = (
+        ranking_metrics_report[ranking_metrics_report["method_name"] == "calibrated_model"].iloc[0]
+        if not ranking_metrics_report[ranking_metrics_report["method_name"] == "calibrated_model"].empty
+        else pd.Series(dtype=object)
+    )
+    best_execution_candidate = (
+        execution_strategy_results.iloc[0] if not execution_strategy_results.empty else pd.Series(dtype=object)
+    )
+    likely_dead_end_lines, promising_lines, strongest_lines = _recommendation_texts(
+        ranking_vs_market,
+        execution_strategy_results,
+        missing_feature_warnings,
+        model_warnings,
     )
 
     if not skip_save:
@@ -1585,9 +2126,21 @@ def run_optimizer(
         save_dataframe(ranking_quality_report, RANKING_QUALITY_REPORT_PATH)
         save_dataframe(stable_ranking_segments, STABLE_RANKING_SEGMENTS_PATH)
         save_dataframe(unstable_segments, UNSTABLE_SEGMENTS_PATH)
+        save_dataframe(execution_strategy_results, EXECUTION_STRATEGY_RESULTS_PATH)
+        save_dataframe(execution_tests, RANKING_EXECUTION_TESTS_PATH)
+        save_dataframe(missing_feature_warnings, MISSING_FEATURE_WARNINGS_PATH)
         json_dump(_config_json_payload(profile_picks["conservative"]), BEST_CONSERVATIVE_PATH)
         json_dump(_config_json_payload(profile_picks["balanced"]), BEST_BALANCED_PATH)
         json_dump(_config_json_payload(profile_picks["aggressive"]), BEST_AGGRESSIVE_PATH)
+        if not best_ranking_method.empty:
+            json_dump(_series_json_payload(best_ranking_method), BEST_RANKING_MODEL_PATH)
+        if not best_calibrated_method.empty:
+            json_dump(_series_json_payload(best_calibrated_method), BEST_CALIBRATED_MODEL_PATH)
+        if not best_execution_candidate.empty:
+            json_dump(_series_json_payload(best_execution_candidate), BEST_EXECUTION_CANDIDATE_PATH)
+        _safe_text_write(LIKELY_DEAD_END_BRANCHES_PATH, likely_dead_end_lines)
+        _safe_text_write(PROMISING_UNPROVEN_BRANCHES_PATH, promising_lines)
+        _safe_text_write(STRONGEST_RESEARCH_DIRECTIONS_PATH, strongest_lines)
 
     helpful_factors, harmful_factors = _describe_factor_direction(factor_importance)
     best_stable = profile_picks["balanced"]
@@ -1669,6 +2222,52 @@ def run_optimizer(
         print(
             f"WARNING: Model probabilities still look poorly calibrated (mean abs bucket gap={calibration_gap:.4f})."
         )
+    if model_warnings:
+        print("Optional ranker availability warnings: " + "; ".join(sorted(set(model_warnings))))
+    if not execution_strategy_results.empty:
+        top_execution = execution_strategy_results.iloc[0]
+        print(
+            f"12. Best execution test: {top_execution['method_name']} / {top_execution['execution_rule']} | "
+            f"bets={int(top_execution['bets'])} roi={top_execution['roi']:.4f} "
+            f"robust={bool(top_execution['survives_robustness'])}"
+        )
+    print("Files created:" if not skip_save else "Files this run would create (skip-save enabled):")
+    for path in [
+        ALL_RESULTS_PATH,
+        TOP_ROBUST_PATH,
+        RANKING_METRICS_PATH,
+        CALIBRATION_REPORT_PATH,
+        RANKING_VS_MARKET_PATH,
+        RANKING_QUALITY_REPORT_PATH,
+        EXECUTION_STRATEGY_RESULTS_PATH,
+        RANKING_EXECUTION_TESTS_PATH,
+        STABLE_RANKING_SEGMENTS_PATH,
+        UNSTABLE_SEGMENTS_PATH,
+        MISSING_FEATURE_WARNINGS_PATH,
+        LIKELY_DEAD_END_BRANCHES_PATH,
+        PROMISING_UNPROVEN_BRANCHES_PATH,
+        STRONGEST_RESEARCH_DIRECTIONS_PATH,
+        BEST_RANKING_MODEL_PATH,
+        BEST_EXECUTION_CANDIDATE_PATH,
+        BEST_CALIBRATED_MODEL_PATH,
+    ]:
+        print(f"- {path}")
+    print(
+        "Exact rerun command: "
+        "python -m app.research.strategy_weight_optimizer --max-configs "
+        f"{max_configs} --chunk-size {chunk_size} --checkpoint-every {checkpoint_every}"
+    )
+    estimated_minutes = max(20, int(max_configs * 0.8))
+    print(f"Estimated runtime: roughly {estimated_minutes // 60}h {estimated_minutes % 60}m at current config count.")
+    print(
+        "Inspect first: ranking_vs_market.csv, ranking_metrics.csv, execution_strategy_results.csv, "
+        "stable_ranking_segments.csv, unstable_segments.csv, calibration_report.csv"
+    )
+    print(
+        "Interpretation guide: positive top1/ndcg deltas imply better ranking than market; "
+        "stable segments need enough races plus positive deltas; execution candidates still need "
+        "bets, drawdown, and winner-removal robustness to count as real."
+    )
 
     return {
         "results": results_frame,
@@ -1684,6 +2283,13 @@ def run_optimizer(
         "stable_ranking_segments": stable_ranking_segments,
         "unstable_segments": unstable_segments,
         "profile_picks": profile_picks,
+        "execution_strategy_results": execution_strategy_results,
+        "ranking_execution_tests": execution_tests,
+        "missing_feature_warnings": missing_feature_warnings,
+        "best_ranking_method": best_ranking_method,
+        "best_execution_candidate": best_execution_candidate,
+        "best_calibrated_method": best_calibrated_method,
+        "model_warnings": model_warnings,
     }
 
 
@@ -1696,6 +2302,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--top-k-robustness", type=int, default=25)
     parser.add_argument("--train-ratio", type=float, default=0.7)
+    parser.add_argument("--chunk-size", type=int, default=25)
+    parser.add_argument("--checkpoint-every", type=int, default=25)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--low-memory-mode", action="store_true")
     parser.add_argument(
         "--skip-save",
         action="store_true",
@@ -1713,6 +2323,10 @@ def main() -> None:
         top_k_robustness=args.top_k_robustness,
         train_ratio=args.train_ratio,
         skip_save=args.skip_save,
+        resume=args.resume,
+        chunk_size=args.chunk_size,
+        checkpoint_every=args.checkpoint_every,
+        low_memory_mode=args.low_memory_mode,
     )
 
 
