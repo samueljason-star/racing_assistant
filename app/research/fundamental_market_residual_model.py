@@ -873,7 +873,7 @@ def run_research(
             spec=ModelSpec(best_fundamental_name, "isotonic" if "isotonic" in best_fundamental_name else "sigmoid"),
             probability_column="fundamental_raw_probability",
             probability_norm_column="fundamental_probability",
-            rank_column="fundamental_model_rank",
+            rank_column="calibrated_model_rank",
         )
         fold_market, _ = _fit_model_variant(
             fold_train,
